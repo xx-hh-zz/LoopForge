@@ -13,7 +13,7 @@ codebuddy --version
 npm install --global @openai/codex@0.162.1 @anthropic-ai/claude-code@2.1.300
 ```
 
-Ensure the service can find `codebuddy` and Node.js on its PATH, or set `AGENTFLOW_CODEBUDDY_BIN` to the installed executable. Configure the model key and its network environment in personal settings. The no-key script demo does not need the CLI. The production Docker image includes CodeBuddy and Codex. Claude Code is not redistributed: the first Main Bot conversation or SOP role that selects it installs the pinned `@anthropic-ai/claude-code` from npm into `$LOOPFORGE_DATA_DIR/cli`, so that first run waits for the download and later runs reuse it; Docker sandboxes and connected runners have their own CLI requirements.
+Ensure the service can find `codebuddy` and Node.js on its PATH, or set `AGENTFLOW_CODEBUDDY_BIN` to the installed executable. Configure the model key and its network environment in personal settings. The no-key script demo does not need the CLI. The production Docker image includes CodeBuddy, Codex, and DeepSeek Harness (`dsh`). DeepSeek Harness runs on Node.js 24 and its headless profile requires `pnpm`, so both are bundled with the image. Claude Code is not redistributed: the first Main Bot conversation or SOP role that selects it installs the pinned `@anthropic-ai/claude-code` from npm into `$LOOPFORGE_DATA_DIR/cli`, so that first run waits for the download and later runs reuse it; Docker sandboxes and connected runners have their own CLI requirements.
 
 Stop the foreground service with Ctrl-C. Start it again with the same command. MySQL data stays in its Compose volume. `docker compose stop mysql` stops the database without deleting it.
 

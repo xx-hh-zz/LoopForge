@@ -13,7 +13,7 @@ async function hydrateGitHubConnections(root=document){
       const button=host.querySelector('[data-github-start]'),status=host.querySelector('[data-github-status]');
       button.hidden=!capability.enabled;button.disabled=!capability.enabled;
       button.textContent='连接 GitHub';
-      status.textContent=capability.enabled?'授权仅用于当前账号，可随时撤销。':'此实例已停用 GitHub 授权，可使用「访问令牌」连接仓库。';
+      status.textContent=!capability.enabled?'此实例已停用 GitHub 授权，可使用「访问令牌」连接仓库。':capability.clientIdSource==='builtin'?'此实例使用 LoopForge 内置 OAuth App。GitHub 授权页会显示该应用的注册者；若不认识，请取消授权，并让部署者配置自己的 Client ID。':'授权仅用于当前账号，可随时撤销。';
     }
   }catch(error){
     for(const host of hosts){host.querySelector('[data-github-status]').textContent='暂时无法检查授权服务，请稍后重试。';const button=host.querySelector('[data-github-start]');button.hidden=false;button.disabled=false;button.textContent='重新检查';host.dataset.enabled='false'}

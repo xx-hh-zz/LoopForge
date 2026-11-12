@@ -62,12 +62,12 @@ func TestGitHubDefaultApplicationAndExplicitOverrides(t *testing.T) {
 	handler, userID := githubTestHandler(t)
 	t.Setenv("AGENTFLOW_GITHUB_CLIENT_ID", "")
 	clientID, err := handler.clientID()
-	if err != nil || clientID != defaultGitHubClientID {
+	if err != nil || clientID != "" {
 		t.Fatalf("fresh installation: %q %v", clientID, err)
 	}
 	current, recorder := githubTestContext(userID, http.MethodGet, "/api/auth/github", "")
 	handler.status(current)
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"enabled":true`) || strings.Contains(recorder.Body.String(), "clientId") {
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"enabled":false`) || !strings.Contains(recorder.Body.String(), `"clientIdSource":"disabled"`) || strings.Contains(recorder.Body.String(), "clientId\"") {
 		t.Fatalf("default capability: %d %s", recorder.Code, recorder.Body)
 	}
 	for _, configured := range []string{"Iv1.custom-application", ""} {

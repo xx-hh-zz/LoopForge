@@ -12,7 +12,7 @@ export TASK_DIR TASK_PORT TASK_MYSQL_PORT TASK_PROJECT
 python3 - <<'PY'
 import os,secrets,pathlib
 root=pathlib.Path(os.environ['TASK_DIR'])
-values={'LOOPFORGE_DB_PASSWORD':secrets.token_hex(24),'LOOPFORGE_DB_ROOT_PASSWORD':secrets.token_hex(24),'AGENTFLOW_SESSION_SECRET':secrets.token_hex(32),'AGENTFLOW_HTTP_PORT':os.environ['TASK_PORT'],'LOOPFORGE_MYSQL_PORT':os.environ['TASK_MYSQL_PORT'],'COMPOSE_PROJECT_NAME':os.environ['TASK_PROJECT'],'LOOPFORGE_DATA_DIR':str(root/'data')}
+values={'LOOPFORGE_DB_PASSWORD':secrets.token_hex(24),'LOOPFORGE_DB_ROOT_PASSWORD':secrets.token_hex(24),'AGENTFLOW_SESSION_SECRET':secrets.token_hex(32),'AGENTFLOW_CONTROL_TOKEN':secrets.token_urlsafe(48),'AGENTFLOW_HTTP_PORT':os.environ['TASK_PORT'],'LOOPFORGE_MYSQL_PORT':os.environ['TASK_MYSQL_PORT'],'COMPOSE_PROJECT_NAME':os.environ['TASK_PROJECT'],'LOOPFORGE_DATA_DIR':str(root/'data')}
 (root/'data'/'home').mkdir(parents=True);(root/'data'/'workspaces').mkdir()
 for name,data in [('install.env',''.join(f'{k}="{v}"\n' for k,v in values.items())),('admin-password',secrets.token_urlsafe(20)),('no-key-password',secrets.token_urlsafe(20))]:
     p=root/name;p.write_text(data);p.chmod(0o600)

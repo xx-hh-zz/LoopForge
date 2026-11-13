@@ -84,9 +84,22 @@ exec "$@"
     def test_root_install_and_repeat_preserve_secrets(self):
         self.assert_success(self.install())
         secrets = (self.root / '.env').read_text()
+        control_token = next(line for line in secrets.splitlines() if line.startswith('AGENTFLOW_CONTROL_TOKEN='))
+        self.assertNotEqual(control_token.partition('=')[2], '')
         self.assert_success(self.install())
         self.assertEqual((self.root / '.env').read_text(), secrets)
         self.assertEqual((self.root / '.env').stat().st_mode & 0o777, 0o600)
+
+    def test_existing_env_gets_control_token_without_rotating_other_secrets(self):
+        env_path = self.root / '.env'
+        env_path.write_text("AGENTFLOW_SESSION_SECRET='keep-this-session-secret'\nAGENTFLOW_CONTROL_TOKEN=''\nLOOPFORGE_DATA_DIR='/srv/loopforge-data'\n")
+        result = subprocess.run(['bash', 'scripts/configure.sh'], cwd=self.root, env=self.environ, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        configured = env_path.read_text()
+        token = next(line.partition('=')[2] for line in configured.splitlines() if line.startswith('AGENTFLOW_CONTROL_TOKEN='))
+        self.assertTrue(token)
+        self.assertIn("AGENTFLOW_SESSION_SECRET='keep-this-session-secret'", configured)
+        self.assertIn("LOOPFORGE_DATA_DIR='/srv/loopforge-data'", configured)
 
     def test_non_root_without_docker_group_uses_sudo_everywhere(self):
         self.assert_success(self.install(MOCK_USER='1000'))

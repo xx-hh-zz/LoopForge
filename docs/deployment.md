@@ -116,7 +116,7 @@ Use `-admin` only when granting platform administration. Running the command aga
 
 ## Workers and runners
 
-The upstream process roles remain `-role api`, `-role worker` and `-role all`. API and worker instances must share the MySQL database and configuration appropriate to their deployment. Set `AGENTFLOW_CONTROL_TOKEN`, `AGENTFLOW_CONTROL_URL` and `AGENTFLOW_WORKER_URL` when separating control and execution. Set `AGENTFLOW_PLATFORM_MCP_URL` to the actual platform URL reachable from execution containers.
+The upstream process roles remain `-role api`, `-role worker` and `-role all`. API and worker instances must share the MySQL database and configuration appropriate to their deployment. The Compose installer generates `AGENTFLOW_CONTROL_TOKEN` for workspace checkpoint requests; keep it stable across restarts. When separating control and execution, configure the same token on API and Worker, set `AGENTFLOW_CONTROL_URL` and `AGENTFLOW_WORKER_URL`, and set `AGENTFLOW_API_URL` on the Worker to the API's internal address. Set `AGENTFLOW_PLATFORM_MCP_URL` to the actual platform URL reachable from execution containers.
 
 Personal runners are connected from the execution-machine page with a short-lived binding code. The installer is served at `/runners/install.sh`. `AGENTFLOW_RUNNER_BINARY` can point to binaries with `{os}` and `{arch}` substitutions. Container images bundle Linux/macOS amd64/arm64 runner and gate binaries. Native source installations can build on demand with Go.
 

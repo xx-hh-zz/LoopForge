@@ -33,8 +33,6 @@ type githubGrant struct {
 	busy          bool
 }
 
-// Self-hosted deployments must configure their own OAuth App. Never silently
-// send users to a shared upstream app registered under another operator.
 const defaultGitHubClientID = ""
 
 func githubLogText(value string) string {

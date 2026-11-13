@@ -9,7 +9,8 @@
 upstream.json
 upstream-overrides.json
 scripts/check-upstream.py
-.data
+.data/
+.agentflow/
 local
 node_modules
 **/node_modules

@@ -422,14 +422,21 @@ func (s *managedSandbox) Exec(ctx context.Context, command CommandSpec, sink Eve
 		return "", ctx.Err()
 	}
 	defer func() { <-s.slots }()
-	s.execMu.Lock()
-	defer s.execMu.Unlock()
 	s.credentialsMu.RLock()
 	credentials := s.credentials
 	s.credentialsMu.RUnlock()
+	// Binding writes the credential helpers into the workspace; parallel
+	// branches then run their commands concurrently.
+	s.execMu.Lock()
 	bound, err := bindCommand(s.Sandbox, s.workspace, command, credentials)
+	s.execMu.Unlock()
 	if err != nil {
 		return "", err
 	}
+	cleanup, err := bindCommandGitSSH(s.Sandbox, s.workspace, bound, credentials)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
 	return s.Sandbox.Exec(ctx, bound, sink)
 }

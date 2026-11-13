@@ -25,8 +25,11 @@ func (p agentCLIProvider) Materialize(ctx *providerMaterializeContext) error {
 	if err != nil {
 		return err
 	}
-	home := filepath.Join(ctx.Workspace, ".agentflow", "private-home", AgentCLIPrivateHomeKey(p.kind, ctx.AgentID))
-	if err := WriteAgentCLIMCPConfig(p.kind, home, entries, AgentCLIMCPOptions{}); err != nil {
+	name := AgentCLIPrivateHomeKey(p.kind, ctx.AgentID)
+	if _, err := EnsureControlDirectory(ctx.Workspace, "private-home", name); err != nil {
+		return err
+	}
+	if err := WriteAgentCLIMCPConfig(p.kind, WorkspaceAgentCLIHome(ctx.Workspace, name), entries, AgentCLIMCPOptions{}); err != nil {
 		return err
 	}
 	ctx.Compiled.SystemPrompt = string(ctx.Content)
@@ -195,6 +198,16 @@ func AgentCLICommand(kind string, o AgentCLICommandOptions) CommandSpec {
 			argv = append(argv, "--session-id", resume)
 		}
 		argv = append(append(argv, extra...), prompt)
+	case AgentCLIZCode:
+		disallowed := zcodeSOPDisallowedTools
+		if o.Chat {
+			disallowed = zcodeChatDisallowedTools
+		}
+		argv = []string{binary, "--prompt", prompt, "--output-format", "stream-json", "--mode", "yolo", "--no-color", "--disallowed-tools", disallowed}
+		if resume != "" {
+			argv = append(argv, "--resume", resume)
+		}
+		argv = append(argv, extra...)
 	}
 	return CommandSpec{Argv: argv, Provider: kind, AgentCLI: options}
 }

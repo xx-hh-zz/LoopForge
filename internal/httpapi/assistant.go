@@ -34,6 +34,10 @@ type assistantDraft struct {
 	Warnings  []string                 `json:"warnings,omitempty"`
 	SaveError string                   `json:"saveError,omitempty"`
 	Review    *assistantApprovalReview `json:"review,omitempty"`
+	// Proposal marks a draft the assistant offers on its own to hand work to a
+	// SOP; Decision is the server-recorded answer to it.
+	Proposal *assistantProposal `json:"proposal,omitempty"`
+	Decision string             `json:"decision,omitempty"`
 }
 type assistantReply struct {
 	SpeakerName    string                       `json:"speakerName,omitempty"`
@@ -210,7 +214,7 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 	sourceRoot := h.resolvedSourceRoot()
 	fullPrompt := h.turnPrompt(req, sourceRoot, false)
 	turn := fullPrompt
-	ctx, cancel := context.WithTimeout(c.Request.Context(), assistantChatTimeout)
+	ctx, cancel := context.WithCancel(c.Request.Context())
 	defer cancel()
 	var emit func(string, any)
 	var activity assistantActivityLog
@@ -238,6 +242,11 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 	var toolFiles agentToolFiles
 	if sess, files, err := h.openAssistantToolSession(modelCtx, user, req.ProjectID, assistantExecModeForApproval(approvalMode), cancelModel); err != nil {
 		logAgentToolEvent("session-fallback", "mode=assistant", "err="+truncateRunes(err.Error(), 160))
+		if modelCtx.Err() != nil {
+			status, message := assistantGenerationFailure(modelCtx, err)
+			c.JSON(status, gin.H{"error": message})
+			return
+		}
 		c.JSON(502, gin.H{"error": "无法启动工具会话，请重试"})
 		return
 	} else {
@@ -246,6 +255,7 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 		sess.RunID = req.RunID
 		sess.ChatSessionID = req.SessionID
 		sess.ChatOwnerID = ownerID
+		sess.turnMessages = append([]assistantMessage(nil), req.Messages...)
 		if saved, ok := h.repo.AssistantSession(ownerID, req.SessionID); ok {
 			sess.SandboxProfileID = saved.SandboxProfileID
 		}
@@ -437,8 +447,15 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 			return
 		}
 		raw, err := generate(modelCtx, turn, user)
+		if err == nil && modelCtx.Err() != nil {
+			err = modelCtx.Err()
+		}
 		if errors.Is(err, errAssistantCredentialRejected) {
 			fail(400, err.Error())
+			return
+		}
+		if errors.Is(err, errAssistantCLIMissing) {
+			fail(503, err.Error())
 			return
 		}
 		if err != nil && !(toolSession != nil && toolSession.finished()) {
@@ -533,6 +550,11 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 				draftCtx = withConversationSession(ctx, req.SessionID)
 			}
 			reply.Drafts = h.resolveAssistantDrafts(draftCtx, user, req.ProjectID, reply.Drafts, approvalMode)
+			var deadline time.Time
+			if sink != nil && req.RunID == "" {
+				deadline = time.Now().Add(assistantProposalTimeout)
+			}
+			stampProposalDeadlines(reply.Drafts, deadline)
 		}
 		{
 			stored := append([]assistantMessage{}, req.Messages...)
@@ -556,6 +578,7 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 				saveErr = saveAssistantConversation(h.repo, ownerID, conversation)
 			}
 			if saveErr != nil {
+				log.Printf("assistant save session=%s: %v", req.SessionID, saveErr)
 				fail(500, "保存对话失败，请重试")
 				return
 			}
@@ -683,30 +706,13 @@ func assistantAttachmentTurnNote(messages []assistantMessage) string {
 }
 
 const (
-	assistantMaxBatch        = 1
-	assistantScheduleTimeout = 180 * time.Minute
+	assistantMaxBatch = 1
+	// assistantMCPCallTimeout bounds one HTTP call to a user MCP server so a
+	// dead server cannot hang a tool call. Turns themselves have no time
+	// limit, like the Codex and Claude Code CLIs: they end when the CLI
+	// finishes or the user stops them.
+	assistantMCPCallTimeout = 60 * time.Minute
 )
-
-// assistantChatTimeout bounds one assistant turn. A turn that edits code,
-// runs tests and reviews the diff can legitimately need more than the old 30
-// minute cap, which cut long code changes off before the final answer.
-// Operators can extend it with AGENTFLOW_ASSISTANT_CHAT_TIMEOUT (Go
-// duration, 5m..4h); the range keeps a stuck generation from holding its
-// workspace lease forever.
-var assistantChatTimeout = assistantTurnTimeout()
-
-func assistantTurnTimeout() time.Duration {
-	const fallback = 60 * time.Minute
-	raw := strings.TrimSpace(os.Getenv("AGENTFLOW_ASSISTANT_CHAT_TIMEOUT"))
-	if raw == "" {
-		return fallback
-	}
-	parsed, err := time.ParseDuration(raw)
-	if err != nil || parsed < 5*time.Minute || parsed > 4*time.Hour {
-		return fallback
-	}
-	return parsed
-}
 
 func assistantNativeRetryPrompt() string {
 	return "本轮尚未完成，请沿当前上下文继续，核对已执行操作，避免重复写入。需要待确认操作时通过 mcp__agentflow_session__submit_assistant_reply 提交完整草稿；普通问答和已实际完成的操作用自然语言总结结果；若工具参数校验失败，修正字段后再提交。不要提交空草稿或进度占位回复。"
@@ -961,6 +967,9 @@ func validateAssistantDraft(d *assistantDraft, projectID string) error {
 	d.Tool = strings.TrimSpace(d.Tool)
 	if d.Tool == "" {
 		return errors.New("drafts 中每个草稿都必须提供 tool 字段，例如 tool=issues_save 或 tool=issues_dispatch；同时保留对应的 body/path/query 参数")
+	}
+	if err := validateAssistantProposal(d); err != nil {
+		return err
 	}
 	if d.Tool == "assistant_tasks_save" {
 		var task assistantTask
@@ -1478,7 +1487,7 @@ func prepareAssistantCommand(opts assistantCommandOpts) (runtime.CommandSpec, er
 		sys = assistantSystemPromptText()
 	}
 	// Use the CLI's unlimited value; omitting the flag retains a finite default.
-	// The conversation deadline and explicit cancellation still stop execution.
+	// A turn has no deadline; explicit cancellation still stops execution.
 	args := []string{"-p", "--max-turns", nativeAssistantUnlimitedTurns, "--system-prompt", sys, "--output-format", "stream-json", "--include-partial-messages", "--mcp-config", opts.Config}
 	if strings.TrimSpace(opts.Settings) != "" {
 		args = append(args, "--settings", opts.Settings)
@@ -1525,18 +1534,6 @@ func assistantCLIWorkspace(tempDir string) string {
 
 func (h *assistantHandlers) openAssistantToolSession(ctx context.Context, user domain.User, projectID string, exec assistantExecMode, cancel context.CancelFunc) (*AgentToolSession, agentToolFiles, error) {
 	return startAgentToolSession(ctx, user, projectID, AgentToolAssistant, exec, "", h.assistantHTTPMCPs(projectID, user.ID), cancel, filepath.Join(assistantSessionRoot(user.ID), "mcp-sessions"))
-}
-
-func (h *assistantHandlers) openScheduledToolSession(ctx context.Context, user domain.User, projectID, sessionID string, cancel context.CancelFunc) (*AgentToolSession, agentToolFiles, error) {
-	// Use the same gateway and policy as a homepage conversation in full-access
-	// mode, so scheduled runs inherit its platform, MCP and workspace tools.
-	session, files, err := h.openAssistantToolSession(ctx, user, projectID, assistantExecModeForApproval(AssistantApprovalAuto), cancel)
-	if err != nil {
-		return nil, files, err
-	}
-	session.ChatSessionID = sessionID
-	session.ChatOwnerID = user.ID
-	return session, files, nil
 }
 
 func (h *assistantHandlers) assistantHTTPMCPs(projectID string, userID int64) []domain.MCPServerDefinition {

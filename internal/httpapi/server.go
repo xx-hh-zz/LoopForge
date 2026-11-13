@@ -43,6 +43,8 @@ type deps struct {
 	schedule   *schedule.Service
 	authClient *auth.Client
 	api        http.Handler
+	// passwordAttempts is this server's brute-force budget (auth_password.go).
+	passwordAttempts *passwordLimiter
 }
 
 // configureSync 是跨领域共享的依赖配置行为（mcp/issues/sync 都调用）。
@@ -120,7 +122,10 @@ func NewWithNotificationsAndBackground(ctx context.Context, s *repo.Store, e *en
 }
 
 func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Service, basicUser, basicPass string, notifications *notification.Service, bg *Background, startBackground func(*assistantHandlers, *runsHandlers)) *gin.Engine {
-	d := &deps{repo: s, engine: e, sync: syncSvc, authClient: auth.NewClientFromEnv()}
+	d := &deps{repo: s, engine: e, sync: syncSvc, authClient: auth.NewClientFromEnv(), passwordAttempts: newPasswordLimiter()}
+	if trustGatewayIdentityHeaders() && strings.TrimSpace(os.Getenv("AGENTFLOW_IDENTITY_HEADER_SECRET")) == "" {
+		log.Printf("warning: AGENTFLOW_TRUST_IDENTITY_HEADERS is on without AGENTFLOW_IDENTITY_HEADER_SECRET; any loopback caller without forwarding headers, including a proxy that passes client headers through, can sign in as any user")
+	}
 	if err := ensureDefaultMCPsForAllProjects(s); err != nil {
 		log.Printf("ensure default project MCPs: %v", err)
 	} else {
@@ -174,9 +179,6 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	if syncSvc != nil {
 		e.MergeIntoBranch = syncSvc.EnsureAndMergeBranchMR
 		e.FindBranchMR = syncSvc.FindBranchMR
-		syncSvc.OnRequirementImported = func(issue domain.Issue) {
-			go stream.autoClarifyIssue(issue.ID)
-		}
 	}
 	// Wake long-polling CLI runners the moment the engine queues a task.
 	e.SetRunnerDispatchNotify(func(provider string) { api.runners.runnerWaiters.notify([]string{provider}) })
@@ -200,6 +202,7 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	// 405/404；gin 默认会 301 重定向到无斜杠路径，行为不同，关闭之。
 	g.RedirectTrailingSlash = false
 	g.Use(api.previews.previewHost())
+	g.Use(api.browser.devServerHost())
 	// gin 只有在显式注册 NoMethod 后才会对"路径匹配但方法不符"返回 405，
 	// 否则落入 404；这里同时把 405 响应统一成 JSON 形态。
 	g.NoMethod(func(c *gin.Context) {
@@ -273,6 +276,9 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	// 工蜂 Git Token 校验：只允许当前登录用户校验自己的令牌。
 	g.GET("/api/users/:id/git-token/verify", api.users.verifyGitToken)
 	g.POST("/api/users/:id/git-token/verify", api.users.verifyGitToken)
+	g.GET("/api/users/:id/git-ssh-keys", api.users.gitSSHKeys)
+	g.PUT("/api/users/:id/git-ssh-keys", api.users.gitSSHKeys)
+	g.DELETE("/api/users/:id/git-ssh-keys/:keyID", api.users.gitSSHKeys)
 	g.POST("/api/users/:id/cli-models/probe", api.users.probeCLIModels)
 	g.Any("/api/users/:id", func(c *gin.Context) {
 		c.JSON(http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -298,7 +304,12 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	g.GET("/api/assistant/sessions/:id/generation", asst.generation)
 	g.POST("/api/assistant/sessions/:id/generation/cancel", asst.generation)
 	g.POST("/api/assistant/sessions/:id/generation/steer", asst.steerGeneration)
+	g.POST("/api/assistant/sessions/:id/proposals", asst.decideProposal)
+	g.GET("/api/assistant/preferences", asst.preferences)
+	g.PUT("/api/assistant/preferences", asst.preferences)
 	g.GET("/api/assistant/models", asst.models)
+	g.POST("/api/assistant/cli-install", asst.installCLI)
+	g.GET("/api/assistant/cli-install", asst.cliInstallStatus)
 	g.POST("/api/assistant/attachments", asst.uploadAttachment)
 	g.GET("/api/assistant/attachments/:id", asst.downloadAttachment)
 	g.GET("/api/assistant/references", asst.workbenchReferences)
@@ -309,6 +320,7 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	g.PUT("/api/assistant/sessions/:id/issue", asst.sessionIssue)
 	g.GET("/api/assistant/sessions", asst.listSessions)
 	g.POST("/api/assistant/sessions/:id/archive", asst.archiveSession)
+	g.POST("/api/assistant/sessions/:id/read", asst.markSessionRead)
 	g.POST("/api/assistant/sessions/:id/fork", asst.forkSession)
 	g.GET("/api/assistant/sessions/:id", asst.session)
 	g.PUT("/api/assistant/sessions/:id/sandbox", asst.sessionSandbox)
@@ -351,7 +363,6 @@ func newWithNotifications(s *repo.Store, e *engine.Engine, syncSvc *tracker.Serv
 	g.Any("/api/issues/:id", api.issues.issue)
 	g.Any("/api/issues/:id/comments", api.issues.issue)
 	g.Any("/api/issues/:id/runs", api.issues.issue)
-	g.Any("/api/issues/:id/clarify", api.issues.issue)
 	g.Any("/api/issues/:id/clarification", api.issues.issue)
 	g.Any("/api/issues/:id/chat-clarify", api.issues.issue)
 	g.Any("/api/issues/:id/chat-clarify/cancel", api.issues.issue)

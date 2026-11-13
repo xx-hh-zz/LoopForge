@@ -15,7 +15,7 @@ async function refreshRunners(silent){
     renderRunnersView();
   }catch(e){if(!silent)toast(e.message)}
 }
-// 接入命令携带一次性绑定码（10 分钟有效）：复制即用，无需先创建个人 Token。
+// 接入命令携带一次性绑定码（10 分钟有效）：复制即用，无需先创建访问密钥。
 async function ensureRunnerBindCode(silent){
   const cached=state.runnerBindCode;
   if(cached&&new Date(cached.expiresAt).getTime()>Date.now()+60_000)return;
@@ -53,8 +53,8 @@ function runnerStatusLabel(status){
     default:return `<span class="runner-status"><i></i>${escapeHTML(status||'unknown')}</span>`;
   }
 }
-const runnerCLILabels={'claude-code':'Claude Code','codex':'Codex','codebuddy':'CodeBuddy',opencode:'OpenCode',cursor:'Cursor CLI',agy:'Antigravity',kimi:'Kimi Code',pi:'Pi',dsh:'DeepSeek Harness'};
-const runnerCLIGlyphs={'claude-code':'C','codex':'X','codebuddy':'B',opencode:'O',cursor:'Cu',agy:'A',kimi:'K',pi:'P',dsh:'D'};
+const runnerCLILabels={'claude-code':'Claude Code','codex':'Codex','codebuddy':'CodeBuddy',opencode:'OpenCode',cursor:'Cursor CLI',agy:'Antigravity',kimi:'Kimi Code',pi:'Pi',dsh:'DeepSeek Harness',zcode:'ZCode'};
+const runnerCLIGlyphs={'claude-code':'C','codex':'X','codebuddy':'B',opencode:'O',cursor:'Cu',agy:'A',kimi:'K',pi:'P',dsh:'D',zcode:'Z'};
 const runnerOSLabels={darwin:'macOS',linux:'Linux',windows:'Windows'};
 function runnerPersonalCredentialConfigured(provider){
   const user=userById(state.currentUser?.id)||{};

@@ -140,6 +140,19 @@ func TestApplyAgentCLICredential(t *testing.T) {
 	if !slices.Equal(argv[:5], []string{"dsh", "--profile", "headless", "--patch", "/h/.dsh/agentflow-model.json"}) {
 		t.Fatalf("dsh argv: %q", argv)
 	}
+	argv, env, err = ApplyAgentCLICredential(AgentCLIDeepSeek, ProviderCredential{
+		APIKey: "relay-test-key", BaseURL: "https://relay.example/v1", Protocol: AgentCLIProtocolChat,
+	}, AgentCLIOptions{Model: "deepseek-v4-flash"}, HostAgentCLIHome(home), "/h", []string{"dsh", "--profile", "headless", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".dsh", "agentflow-model.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env[agentCLIKeyEnv] != "relay-test-key" || !strings.Contains(string(data), `"baseURL": "https://relay.example/v1"`) || !strings.Contains(string(data), `"apiKeyEnv": "`+agentCLIKeyEnv+`"`) || strings.Contains(string(data), "relay-test-key") {
+		t.Fatalf("dsh relay credentials leaked or were not configured: env=%v patch=%s", env, data)
+	}
 }
 
 func TestWriteAgentCLIMCPConfigChat(t *testing.T) {

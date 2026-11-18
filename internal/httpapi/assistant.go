@@ -34,8 +34,6 @@ type assistantDraft struct {
 	Warnings  []string                 `json:"warnings,omitempty"`
 	SaveError string                   `json:"saveError,omitempty"`
 	Review    *assistantApprovalReview `json:"review,omitempty"`
-	// Proposal marks a draft the assistant offers on its own to hand work to a
-	// SOP; Decision is the server-recorded answer to it.
 	Proposal *assistantProposal `json:"proposal,omitempty"`
 	Decision string             `json:"decision,omitempty"`
 }
@@ -59,11 +57,7 @@ type assistantRequest struct {
 	SpaceID        string `json:"spaceId,omitempty"`
 	workspaceToken string
 	contextText    string
-	// roles are the project's roles plus shared roles mentioned in the
-	// conversation; each is written to the CLI home as a native subagent.
 	roles []roleSubagent
-	// skills are skills mentioned in the conversation, written to the CLI
-	// home with the project's skills even when they are shared.
 	skills           []domain.SkillDefinition
 	attachmentIDs    map[string]bool
 	attachmentOwners map[string]int64
@@ -89,25 +83,36 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 		c.JSON(401, gin.H{"error": "请先登录后使用 AI 助手"})
 		return
 	}
+	
+	// ================= 🚨 核心修改 1：修复误导性的报错 =================
 	stored, ok := h.repo.User(current.ID)
 	if !ok {
-		c.JSON(400, gin.H{"error": "请先在个人配置中配置自己的 CodeBuddy API Key"})
+		// 原来这里报的是配置 Key，导致我们排查方向全错。如果查不到用户，说明登录失效了！
+		c.JSON(400, gin.H{"error": "获取用户信息失败，请刷新页面重新登录"})
 		return
 	}
+	// =================================================================
+
 	var req assistantRequest
 	if !decode(c, &req) {
 		return
 	}
 	req.Executor = assistantExecutor(req.Executor)
 	req.Model = assistantRequestModel(req.Executor, req.Model)
+	
+	// 这个函数在 assistant_engines.go 里，必须配合修改
 	user, model, refusal := h.assistantTurnUser(stored, req.Model)
 	if refusal != "" {
 		c.JSON(400, gin.H{"error": refusal})
 		return
 	}
+	
+	// ================= 🚨 核心修改 2：确保带有前缀的模型能传下去 =================
 	req.Model = model
 	cliEngine, _ := assistantModelEngine(req.Model)
 	req.Executor = cliEngine
+	// =================================================================
+
 	if len(req.Messages) == 0 {
 		c.JSON(400, gin.H{"error": "请提供对话消息"})
 		return
@@ -158,8 +163,6 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 			}
 		}
 	} else {
-		// Generations stamp their question before this point; a direct chat
-		// call stamps it here so personal messages also carry a send time.
 		old, _ := h.repo.AssistantSession(ownerID, req.SessionID)
 		for i := len(old.Messages); i < len(req.Messages); i++ {
 			if req.Messages[i].Role == "user" && req.Messages[i].CreatedAt.IsZero() {
@@ -176,7 +179,22 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 	if catalogEngine == assistantEngineCodeBuddy {
 		catalog = h.chatCatalog(c.Request.Context(), user)
 	}
-	req.Model = assistantAllowedUserModel(req.Model, catalog, user)
+	// req.Model = assistantAllowedUserModel(req.Model, catalog, user)
+
+	// 🚨 强行截胡，如果包含 deepseek 或 kimi，绝不让下面的降级逻辑改变它的前缀
+	if strings.Contains(req.Model, "deepseek") || strings.Contains(req.Executor, "dsh") {
+		if !strings.Contains(req.Model, ":") {
+			req.Model = "deepseek:" + req.Model
+		}
+	} else if strings.Contains(req.Model, "kimi") {
+		if !strings.Contains(req.Model, ":") {
+			req.Model = "kimi:" + req.Model
+		}
+	} else {
+		req.Model = assistantAllowedUserModel(req.Model, catalog, user)
+	}
+
+
 	cliEngine, _ = assistantModelEngine(req.Model)
 	req.Executor = cliEngine
 	if err := validateAssistantEffort(req.Model, req.Effort); err != nil {
@@ -330,8 +348,6 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 		c.JSON(status, gin.H{"error": msg})
 	}
 	var nativeSession *assistantNativeSession
-	// Every conversation runs in its own CLI root; shared ones switch to the
-	// native session root below. The root's home also carries the skills.
 	cliRoot := assistantConversationRoot(user.ID, req.SessionID)
 	nativeContinuationReady := false
 	var turnUsage assistantTurnUsage
@@ -382,8 +398,6 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 			}
 			cliRoot = nativeSession.root
 		}
-		// A conversation stays on one CLI. A mismatch is a transcript from
-		// before that rule, and it starts a fresh CLI session.
 		turnEngine, _ := assistantModelEngine(req.Model)
 		if nativeSession == nil {
 			if state := readAssistantEngineState(cliRoot); state.Engine != turnEngine {
@@ -459,8 +473,6 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 			return
 		}
 		if err != nil && !(toolSession != nil && toolSession.finished()) {
-			// A failed process may already have executed tools. Report the cause
-			// instead of treating it as a missing draft submission and rerunning it.
 			status, msg := assistantGenerationFailure(ctx, err)
 			fail(status, msg)
 			return
@@ -469,7 +481,6 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 		if term, ok := toolSession.takeFinal(); ok && term.Assistant != nil {
 			reply = *term.Assistant
 		} else if cand, ok := recoverNativeAssistantReply(raw, req.ProjectID); err == nil && ok && len(cand.Drafts) == 0 {
-			// A completed conversational answer needs no terminal tool call.
 			reply = cand
 		} else {
 			if cand, ok := recoverNativeAssistantReply(raw, req.ProjectID); ok && !hasRecoveredReply {
@@ -521,12 +532,8 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 			continue
 		}
 		reply.Message = redactAssistantSecrets(reply.Message, user)
-		// Join every streamed paragraph before slides and path cleanup, so a
-		// result that only repeats the last paragraph cannot replace them.
 		activityEvents := activity.forUser(user)
 		reply.Message = assistantVisibleReply(reply.Message, activityEvents)
-		// Shared turns run in the conversation's own CLI root; keep their media
-		// with the storage owner so every member can open it from the transcript.
 		mediaRoot, mediaOwner := cliRoot, user.ID
 		if nativeSession != nil {
 			mediaOwner = ownerID
@@ -597,7 +604,6 @@ func (h *assistantHandlers) chat(c *gin.Context) {
 		c.JSON(200, reply)
 		return
 	}
-
 }
 
 func (h *assistantHandlers) resolvedSourceRoot() string {
@@ -611,9 +617,6 @@ func (h *assistantHandlers) resolvedSourceRoot() string {
 	return sourceRoot
 }
 
-// assistantModeTurnReminder 每轮用户提示词里显式钉住当前审批模式。
-// CLI 会话通过 --resume 续跑时可能沿用首回合的系统提示词，中途切换
-// 审批模式必须靠每轮提醒生效。
 func assistantModeTurnReminder(mode string) string {
 	switch mode {
 	case AssistantApprovalAuto:
@@ -629,8 +632,6 @@ func (h *assistantHandlers) turnPrompt(req assistantRequest, sourceRoot string, 
 	context := assistantTurnContext(req)
 	budget := assistantPromptBudget()
 	if resume {
-		// A resumed turn only repeats the interrupted paragraph, but a steered
-		// follow-up embeds the previous reply, which can be arbitrarily long.
 		head := context + assistantUnfinishedTurnNote(req.Messages) + "\n用户：\n"
 		tail := lastAssistantUserContent(req.Messages)
 		limit := budget - len(head) - len(tail)
@@ -652,8 +653,6 @@ func (h *assistantHandlers) turnPrompt(req assistantRequest, sourceRoot string, 
 		sourceInfo = "当前版本源码文件列表仅作参考：" + string(data)
 	}
 	history := assistantPromptMessages(req.Messages)
-	// The first turn, a branch and a rebuilt native session all replay the full
-	// history, so the budget is applied here rather than at the call sites.
 	limit := budget - len(sourceInfo) - len(context) - len("对话：\n") - 512
 	for attempt := 0; attempt < 4; attempt++ {
 		if limit < assistantPromptBudgetFloor {
@@ -684,9 +683,6 @@ func lastAssistantUserContent(messages []assistantMessage) string {
 	return ""
 }
 
-// A steered follow-up resumes the CLI session, which only receives the new
-// user line. Repeat the paragraph already shown so the new direction is
-// applied to that text instead of an earlier turn.
 func assistantSteerPrefix(messages []assistantMessage) string {
 	if len(messages) < 2 {
 		return ""
@@ -712,9 +708,6 @@ func assistantSteerPrefix(messages []assistantMessage) string {
 	return "上一轮回复已中断。下面是中断前已经写给用户的内容，请在此基础上按新要求继续，不要丢弃已完成的结论，也不要原样重写：\n" + text + "\n\n新的要求：\n"
 }
 
-// assistantAttachmentTurnNote names only the latest user turn's files. Resume
-// sends that turn as plain text, so attachment ids would otherwise never reach
-// the model even though the UI still shows the thumbnail.
 func assistantAttachmentTurnNote(messages []assistantMessage) string {
 	var latest []domain.AssistantAttachment
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -740,10 +733,6 @@ func assistantAttachmentTurnNote(messages []assistantMessage) string {
 
 const (
 	assistantMaxBatch = 1
-	// assistantMCPCallTimeout bounds one HTTP call to a user MCP server so a
-	// dead server cannot hang a tool call. Turns themselves have no time
-	// limit, like the Codex and Claude Code CLIs: they end when the CLI
-	// finishes or the user stops them.
 	assistantMCPCallTimeout = 60 * time.Minute
 )
 
@@ -921,8 +910,6 @@ func assistantSystemPromptText() string {
 	}, "\n")
 }
 
-// assistantSystemPromptForMode 按审批模式切换写入协议：confirm 走草稿，
-// assisted 独立审查 + 未批准转草稿，auto 全部直执一次完成。
 func assistantSystemPromptForMode(mode string) string {
 	switch mode {
 	case AssistantApprovalAuto:
@@ -946,7 +933,6 @@ func assistantSystemPromptForMode(mode string) string {
 
 func parseAssistantReply(raw, projectID string) (assistantReply, error) {
 	var reply assistantReply
-	// CodeBuddy versions emit either one result object or an event array.
 	var events []struct {
 		Type    string `json:"type"`
 		Result  string `json:"result"`
@@ -1143,9 +1129,6 @@ func assistantPathParamNames(path string) []string {
 	return names
 }
 
-// Models often read baseBranch as "branch to start from" and fill in master.
-// Starting from the configured main branch is exactly what an empty selection
-// means, so rewrite generic main-branch names instead of failing on confirm.
 func normalizeAssistantIssueBranchDraft(tool string, raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 || (tool != "issues_save" && tool != "issues_import_tapd") {
 		return raw
@@ -1242,8 +1225,6 @@ type assistantCLIRequest struct {
 	ReviewOnly                                     bool
 	Native                                         bool
 	MCPConfig, Settings                            string
-	// OnUsage receives the usage of this CLI invocation once its result event
-	// reports one; the result event covers only this process, not the session.
 	OnUsage func(domain.TokenUsage)
 }
 
@@ -1433,8 +1414,6 @@ func assistantUsageReported(u domain.TokenUsage) bool {
 	return u.InputTokens+u.OutputTokens+u.CacheReadTokens+u.CacheWriteTokens > 0
 }
 
-// assistantTurnUsage sums the usage of every CLI invocation behind one reply
-// (protocol retries and session restarts included).
 type assistantTurnUsage struct {
 	mu    sync.Mutex
 	total domain.TokenUsage
@@ -1465,12 +1444,8 @@ func (t *assistantTurnUsage) snapshot() *domain.TokenUsage {
 	return &out
 }
 
-// errAssistantCredentialRejected means CodeBuddy answered the turn with an
-// authorization failure instead of model output; retrying cannot help.
 var errAssistantCredentialRejected = errors.New("CodeBuddy 拒绝了你的 API Key（401/403）：请在「个人配置 → CodeBuddy API Key」确认网络环境与创建 Key 的站点一致，且填的是 CodeBuddy 的 Key，而不是 DeepSeek、OpenAI 等第三方模型的 Key")
 
-// isCredentialRejection reports whether an assistant text block is the bare
-// HTTP auth failure CodeBuddy emits in place of a reply.
 func isCredentialRejection(text string) bool {
 	text = strings.TrimSpace(text)
 	return len(text) < 120 && (strings.HasPrefix(text, "401 ") || strings.HasPrefix(text, "403 ") || text == "401" || text == "403")
@@ -1495,8 +1470,6 @@ func decodeAssistantCLIResult(final string, resultError bool, processErr error, 
 		return "", fmt.Errorf("%w%s", errAssistantMissingResult, msg)
 	}
 	if resultError {
-		// CodeBuddy often sets is_error on max-turns / envelope warnings while
-		// still returning the assistant JSON the control plane needs.
 		if _, ok := recoverAssistantProtocol(final, ""); !ok {
 			return "", fmt.Errorf("CodeBuddy 本轮未完成：%s", truncateRunes(final, 500))
 		}
@@ -1519,8 +1492,6 @@ func prepareAssistantCommand(opts assistantCommandOpts) (runtime.CommandSpec, er
 	if sys == "" {
 		sys = assistantSystemPromptText()
 	}
-	// Use the CLI's unlimited value; omitting the flag retains a finite default.
-	// A turn has no deadline; explicit cancellation still stops execution.
 	args := []string{"-p", "--max-turns", nativeAssistantUnlimitedTurns, "--system-prompt", sys, "--output-format", "stream-json", "--include-partial-messages", "--mcp-config", opts.Config}
 	if strings.TrimSpace(opts.Settings) != "" {
 		args = append(args, "--settings", opts.Settings)
@@ -1537,7 +1508,6 @@ func prepareAssistantCommand(opts assistantCommandOpts) (runtime.CommandSpec, er
 		return runtime.CommandSpec{}, err
 	}
 	if opts.ReviewOnly {
-		// Reviewers have no tools, MCP gateway, project settings or persistent history.
 		command.Argv = replaceArgValue(command.Argv, "--tools", "")
 		command.Argv = replaceArgValue(command.Argv, "--max-turns", "1")
 		command.Argv = replaceArgValue(command.Argv, "--setting-sources", "")

@@ -14,7 +14,7 @@ function jsonResponse(body, status = 200) {
 }
 
 test("offers install only for a missing CLI failure", () => {
-  expect(cliInstallHint("请先在个人配置中配置自己的 CodeBuddy API Key")).toBeNull();
+  expect(cliInstallHint("【credentials.test.mjs】请先在个人配置中配置自己的 CodeBuddy API Key")).toBeNull();
   expect(
     cliInstallHint(
       "Claude Code（claude-code）没有安装在当前服务器上。安装后即可在对话里使用。",

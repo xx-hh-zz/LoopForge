@@ -35,6 +35,7 @@ func (h *assistantHandlers) startGeneration(c *gin.Context) {
 		return
 	}
 	req.Model = assistantRequestModel(req.Executor, req.Model)
+
 	user, model, refusal := h.assistantTurnUser(stored, req.Model)
 	if refusal != "" {
 		c.JSON(400, gin.H{"error": refusal})
@@ -379,7 +380,7 @@ func (h *assistantHandlers) steerGeneration(c *gin.Context) {
 	}
 	stored, ok := h.repo.User(current.ID)
 	if !ok {
-		c.JSON(400, gin.H{"error": "请先配置个人 CodeBuddy API Key"})
+		c.JSON(400, gin.H{"error": "【001】请先配置个人 CodeBuddy API Key"})
 		return
 	}
 	ownerID, _, err := h.conversationScope(c, c.Param("id"), "", "", stored.ID)

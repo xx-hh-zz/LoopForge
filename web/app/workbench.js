@@ -1199,6 +1199,7 @@ const PLATFORM_TABS=[
   {id:'accounts',zh:'成员账号',en:'Accounts'},
   {id:'admins',zh:'平台管理员',en:'Admins'},
   {id:'sharedKey',zh:'共享 CodeBuddy Key',en:'Shared CodeBuddy Key'},
+  {id:'sharedKimiKey',zh:'共享 key',en:'Shared Kimi Key'},
 ];
 function platformTabsHTML(active){
   return `<div class="pa-tabs-wrap platform-tabs-wrap"><div class="pa-tabs platform-tabs" id="platformTabs" role="tablist" aria-label="平台管理分区">${PLATFORM_TABS.map(t=>{
@@ -1237,6 +1238,7 @@ function renderPlatformAdminPanel(){
   host.innerHTML=`
     ${platformTabsHTML(tab)}
     ${platformTabPanel('accounts',tab,platformAccountsHTML())}
+    ${platformTabPanel('sharedKimiKey',tab,platformKimiKeyHTML())}
     ${platformTabPanel('admins',tab,`
     <div class="platform-metric-grid">
       <div class="platform-metric-card">
@@ -1371,6 +1373,7 @@ function renderPlatformAdminPanel(){
   bindPlatformTabs(host);
   loadPlatformAccounts(host);
   loadPlatformSharedKey(host);
+  loadPlatformKimiKey(host);
   loadPlatformAdmins(host);
 }
 
@@ -1455,6 +1458,48 @@ function platformSharedKeyHTML(){
       </form>
     </section>`;
 }
+// function platformKimiKeyHTML(){
+//   return `
+//     <section class="platform-admin-main-card" id="platformKimiKeyCard">
+//       <div class="platform-admin-head">
+//         <div class="platform-admin-head-meta">
+//           <h2>共享 Kimi / DeepSeek Key</h2>
+//           <p>未配置个人 Key 的成员将使用这里的 Key。默认优先使用 Kimi，未配置时回退到 DeepSeek。</p>
+//         </div>
+//         <span class="platform-admin-count-pill platform-status-pill" data-kimi-key-badge>未启用</span>
+//       </div>
+//       <form id="platformKimiKeyForm" class="platform-shared-key-form" autocomplete="off">
+//         <div class="platform-shared-key-grid">
+//           <div class="platform-shared-key-col">
+//             <label class="platform-field"><span>选择引擎</span>
+//               <select name="provider">
+//                 <option value="kimi">Kimi (Moonshot)</option>
+//                 <option value="deepseek">DeepSeek</option>
+//               </select>
+//             </label>
+//             <div class="platform-field-group">
+//               <label class="platform-field"><span>API Key</span><input name="apiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="sk- 开头的 API Key"></label>
+//             </div>
+//             <label class="platform-field"><span>Base URL</span><input name="baseUrl" type="url" placeholder="https://api.moonshot.cn/v1"></label>
+//           </div>
+//           <div class="platform-shared-key-col">
+//             <div class="platform-field">
+//               <div class="platform-field-head"><span>允许使用的模型</span></div>
+//               <label class="platform-field" style="margin-top: 10px;"><input name="models" placeholder="模型 ID，多个用逗号分隔，如: moonshot-v1-8k, moonshot-v1-32k" autocomplete="off" spellcheck="false"></label>
+//             </div>
+//           </div>
+//         </div>
+//         <div class="platform-shared-key-footer">
+//           <p class="platform-add-hint"></p>
+//           <div class="platform-shared-key-actions">
+//             <button class="button ghost danger" type="button" data-kimi-key-clear hidden>停用共享 Key</button>
+//             <button class="button primary" type="submit">保存</button>
+//           </div>
+//         </div>
+//       </form>
+//     </section>`;
+// }
+
 function platformAccountCreatedHTML(action,login,password){
   const who=`<b data-i18n-skip>${escapeHTML(login)}</b>`,secret=`<code>${escapeHTML(password)}</code>`;
   const text=action==='reset'
@@ -2037,4 +2082,238 @@ function renderDashboard(){
   $('#dashFeedHint').textContent=synced?`最近同步 ${synced.toLocaleString()}${syncResult?` · ${syncResult}`:''}`:'从未同步';
   const feed=logs.slice(0,8).map(l=>`<div class="tl-item"><div><b>${l.direction==='pull'?'拉取':'推送'} · ${l.source==='github'?'GitHub':l.source==='gongfeng'?'工蜂':l.source==='tapd'?'TAPD':escapeHTML(l.source||'')}</b> <span class="muted">${escapeHTML(l.message||l.action)}</span></div><div class="muted" style="font-size:10.5px;margin-top:2px">${new Date(l.startedAt).toLocaleString()} · ${l.status==='success'?'成功':`失败 ${escapeHTML(l.message||'')}`}</div></div>`).join('');
   $('#dashFeed').innerHTML=feed||'<div class="tl-item"><div class="muted">尚未同步。绑定 GitHub 仓库后，可在「需求列表」里点击「同步 GitHub」。</div></div>';
+}
+
+// ==========================================
+// 🚨 新增：共享 Kimi / DeepSeek Key 独立逻辑
+// 这块代码独立封装，防止官方更新冲突
+// ==========================================
+
+function platformKimiKeyHTML(){
+  return `
+    <section class="platform-admin-main-card" id="platformKimiKeyCard">
+      <div class="platform-admin-head">
+        <div class="platform-admin-head-meta">
+          <h2>公用key</h2>
+          <p>未配置个人 Key 的成员将使用这里的 Key。</p>
+        </div>
+        <span class="platform-admin-count-pill platform-status-pill" data-kimi-key-badge>加载中</span>
+      </div>
+      <form id="platformKimiKeyForm" class="platform-shared-key-form" autocomplete="off">
+        <div class="platform-shared-key-grid">
+          <div class="platform-shared-key-col">
+            <label class="platform-field">
+              <span>选择引擎</span>
+              <select name="provider">
+                <option value="kimi">Kimi (Moonshot)</option>
+                <option value="deepseek">DeepSeek</option>
+              </select>
+            </label>
+            <div class="platform-field-group">
+              <label class="platform-field">
+                <span>API Key</span>
+                <input name="apiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="sk- 开头的 API Key">
+              </label>
+            </div>
+            <label class="platform-field">
+              <span>Base URL</span>
+              <input name="baseUrl" type="url" placeholder="https://api.moonshot.cn/v1">
+            </label>
+          </div>
+          
+          <div class="platform-shared-key-col">
+            <div class="platform-field">
+              <div class="platform-field-head">
+                <span>允许使用的模型</span>
+                <small data-kimi-models-count></small>
+              </div>
+              <!-- 🚨 这里是复选框网格 -->
+              <div class="platform-model-list" data-kimi-models-list></div>
+            </div>
+            <label class="platform-field">
+              <span>列表里没有的模型</span>
+              <input name="extraModels" placeholder="模型 ID，多个用逗号分隔" autocomplete="off" spellcheck="false">
+            </label>
+          </div>
+        </div>
+        <div class="platform-shared-key-footer">
+          <p class="platform-add-hint">保存后即刻生效，无需重启服务。成员配置了自己的个人 Key 时，以自己的 Key 为准。</p>
+          <div class="platform-shared-key-actions">
+            <button class="button ghost danger" type="button" data-kimi-key-clear hidden>停用共享 Key</button>
+            <button class="button primary" type="submit">保存</button>
+          </div>
+        </div>
+      </form>
+    </section>`;
+}
+
+// 定义常用的模型列表
+const KIMI_SUPPORTED_MODELS = [
+  { id: 'moonshot-v1-8k', name: 'moonshot-v1-8k' },
+  { id: 'moonshot-v1-32k', name: 'moonshot-v1-32k' },
+  { id: 'moonshot-v1-128k', name: 'moonshot-v1-128k' },
+  { id: 'kimi-k2.7-code', name: 'Kimi K2.7 Code' },
+  { id: 'kimi-k2.6', name: 'kimi-k2.6' },
+  { id: 'kimi-k3', name: 'kimi-k3' },
+  { id: 'kimi-k3.1-pro', name: 'Kimi K3.1 Pro' },
+];
+const DEEPSEEK_SUPPORTED_MODELS = ['deepseek-chat', 'deepseek-coder', 'deepseek-flash'];
+
+async function loadPlatformKimiKey(host){
+  const card=host.querySelector('#platformKimiKeyCard');if(!card)return;
+  const form=card.querySelector('#platformKimiKeyForm');
+  const badge=card.querySelector('[data-kimi-key-badge]');
+  const providerSelect=form.querySelector('select[name="provider"]');
+  const apiKeyInput=form.querySelector('input[name="apiKey"]');
+  const baseUrlInput=form.querySelector('input[name="baseUrl"]');
+  const extraModelsInput=form.querySelector('input[name="extraModels"]');
+  const modelsListContainer=form.querySelector('[data-kimi-models-list]');
+  const modelsCountLabel=form.querySelector('[data-kimi-models-count]');
+  const clearBtn=form.querySelector('[data-kimi-key-clear]');
+  const defaultBaseURL=provider=>provider==='deepseek'?'https://api.deepseek.com/v1':'https://api.moonshot.cn/v1';
+  const savedKeyPlaceholder='••••••••••••••••';
+  const providerStorageKey='loopforge.platform.shared-key.provider';
+  const setKeyPlaceholder=(configured,provider)=>{
+    apiKeyInput.dataset.secretPlaceholder=configured?'masked':'';
+    apiKeyInput.placeholder=configured?savedKeyPlaceholder:(provider==='kimi'?'sk- 开头的 Kimi API Key':'sk- 开头的 DeepSeek API Key');
+  };
+  try {
+    const savedProvider=localStorage.getItem(providerStorageKey);
+    if(savedProvider==='kimi'||savedProvider==='deepseek')providerSelect.value=savedProvider;
+  } catch {}
+  
+  // 渲染复选框
+  const renderCheckboxes = (savedModels = []) => {
+    const isKimi = providerSelect.value === 'kimi';
+    const defaultModels = (isKimi ? KIMI_SUPPORTED_MODELS : DEEPSEEK_SUPPORTED_MODELS)
+      .map(model => typeof model === 'string' ? { id: model, name: model } : model);
+    
+    // 拆分：哪些在默认列表里，哪些是额外手动添加的
+    const extraModels = savedModels.filter(m => !defaultModels.includes(m));
+    extraModelsInput.value = extraModels.join(', ');
+
+    modelsListContainer.innerHTML = defaultModels.map(modelId => {
+      const isChecked = savedModels.includes(modelId.id) ? 'checked' : '';
+      return `
+        <label class="platform-model-item">
+          <input type="checkbox" name="selectedModels" value="${modelId.id}" ${isChecked}>
+          <span>${modelId.name}</span>
+        </label>`;
+    }).join('');
+    
+    updateCount();
+  };
+
+  // 更新勾选数量提示
+  const updateCount = () => {
+    const checked = [...form.querySelectorAll('input[name="selectedModels"]:checked')].length;
+    modelsCountLabel.textContent = `已选 ${checked} 个`;
+  };
+
+  // 监听复选框变化
+  modelsListContainer.onchange = updateCount;
+  
+  // 1. 获取当前状态
+  const load=async({resetModels=true}={})=>{
+    try {
+      const res = await api(`/api/platform/kimi-key?provider=${providerSelect.value}`);
+      let currentModels = [];
+      if(res && res.configured) {
+        badge.textContent = '已启用';
+        badge.className = 'platform-admin-count-pill platform-status-pill is-ok';
+        clearBtn.hidden = false;
+        baseUrlInput.value = res.baseUrl || defaultBaseURL(providerSelect.value);
+        setKeyPlaceholder(true,providerSelect.value);
+        if(res.models && res.models.length) {
+           currentModels = res.models;
+        }
+      } else {
+        badge.textContent = '未启用';
+        badge.className = 'platform-admin-count-pill platform-status-pill is-off';
+        clearBtn.hidden = true;
+        if(resetModels)baseUrlInput.value = defaultBaseURL(providerSelect.value);
+        setKeyPlaceholder(false,providerSelect.value);
+      }
+      // 根据拿到的模型数据，渲染复选框
+      renderCheckboxes(currentModels);
+    } catch(e) {
+      console.error('获取共享 Key 状态失败', e);
+      badge.textContent = '读取失败';
+      renderCheckboxes([]);
+    }
+  };
+  
+  // 2. 联动界面：切换引擎时自动改变默认 URL 并重新渲染模型列表
+  providerSelect.onchange = () => {
+    try { localStorage.setItem(providerStorageKey, providerSelect.value); } catch {}
+    if(providerSelect.value === 'kimi') {
+      setKeyPlaceholder(false,'kimi');
+      baseUrlInput.placeholder = 'https://api.moonshot.cn/v1';
+      if(!baseUrlInput.value || baseUrlInput.value.includes('deepseek')) baseUrlInput.value = 'https://api.moonshot.cn/v1';
+    } else {
+      setKeyPlaceholder(false,'deepseek');
+      baseUrlInput.placeholder = 'https://api.deepseek.com/v1';
+      if(!baseUrlInput.value || baseUrlInput.value.includes('moonshot')) baseUrlInput.value = 'https://api.deepseek.com/v1';
+    }
+    load(); // 切换时重新拉取该引擎的状态
+  };
+
+  // 3. 保存逻辑
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const provider = providerSelect.value;
+    const apiKey = apiKeyInput.value.trim();
+    const baseUrl = baseUrlInput.value.trim();
+    
+    // 🚨 收集所有选中的和手动填写的模型
+    const selectedModels = [...form.querySelectorAll('input[name="selectedModels"]:checked')].map(cb => cb.value);
+    const extraModels = extraModelsInput.value.split(',').map(s => s.trim()).filter(Boolean);
+    const finalModels = [...new Set([...selectedModels, ...extraModels])]; // 合并去重
+    
+    const configured=badge.textContent==='已启用';
+    if(!apiKey && !configured) { toast('请输入 API Key', 'err'); return; }
+    if(finalModels.length === 0) { toast('请至少勾选或填写一个模型', 'err'); return; }
+    
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if(submitBtn) submitBtn.disabled = true;
+
+    try {
+      const status=await api('/api/platform/kimi-key', {
+        method: 'PUT',
+        body: JSON.stringify({ provider, apiKey, baseUrl, models: finalModels })
+      });
+      toast('保存成功！', 'ok');
+      apiKeyInput.value = ''; // 安全起见，保存后清空密码框
+      badge.textContent=status?.configured?'已启用':'未启用';
+      badge.className=`platform-admin-count-pill platform-status-pill ${status?.configured?'is-ok':'is-off'}`;
+      clearBtn.hidden=!status?.configured;
+      setKeyPlaceholder(!!status?.configured,provider);
+      await load();
+    } catch (err) {
+      toast(err.message || '保存失败', 'err');
+    } finally {
+      if(submitBtn) submitBtn.disabled = false;
+    }
+  };
+
+  // 4. 停用逻辑
+  clearBtn.onclick = async () => {
+    if(!await afConfirm({
+        title:'停用共享 Key',
+        message:`确定要停用 ${providerSelect.value === 'kimi' ? 'Kimi' : 'DeepSeek'} 的共享 Key 吗？停用后，没配 Key 的成员将无法使用该引擎。`,
+        danger:true,
+        confirmText:'停用'
+    })) return;
+    
+    try {
+      await api(`/api/platform/kimi-key?provider=${providerSelect.value}`, { method: 'DELETE' });
+      toast('已停用', 'ok');
+      load();
+    } catch(err) {
+      toast(err.message || '停用失败', 'err');
+    }
+  };
+  
+  // 初始化
+  providerSelect.onchange();
 }

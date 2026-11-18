@@ -7,6 +7,8 @@ import (
 
 // User 表示系统注册或登录的员工实体，用于后续资源归属与权限隔离。
 type User struct {
+	KimiAPIKey     string `gorm:"column:kimi_api_key"`
+	DeepSeekAPIKey string `gorm:"column:deepseek_api_key"`
 	CodexAPIKey                string `json:"codexApiKey,omitempty"`
 	CodexAPIKeyConfigured      bool   `json:"codexApiKeyConfigured,omitempty"`
 	CodexBaseURL               string `json:"codexBaseUrl,omitempty"`

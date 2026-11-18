@@ -25,7 +25,7 @@ export const engineModels = (models, engine) =>
 // Mirrors assistantEngineMissingKey in internal/httpapi/assistant_engines.go;
 // credentialHint turns it into a "去配置" button.
 export function engineMissingKeyMessage(engine) {
-  if (engine.id === defaultEngine) return "请先在个人配置中配置自己的 CodeBuddy API Key";
+  if (engine.id === defaultEngine) return "【useChat.js】请先在个人配置中配置自己的 CodeBuddy API Key";
   return `请先在个人配置中配置 ${engine.name} API Key 后再使用 ${engine.name} 模型`;
 }
 

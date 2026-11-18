@@ -39,6 +39,8 @@ type userConfigRow struct {
 	GongfengTokenExpiresAt       *time.Time `gorm:"column:gongfeng_token_expires_at"`
 	CodeBuddyAPIKey              *string    `gorm:"column:codebuddy_api_key;type:text"`
 	CodeBuddyInternetEnvironment string     `gorm:"column:codebuddy_internet_environment;size:64"`
+	KimiAPIKey                   *string    `gorm:"column:kimi_api_key;type:text"`
+	DeepSeekAPIKey               *string    `gorm:"column:deepseek_api_key;type:text"`
 	CodexAPIKey                  *string    `gorm:"column:codex_api_key;type:text"`
 	CodexBaseURL                 *string    `gorm:"column:codex_base_url;type:text"`
 	CodexModels                  *string    `gorm:"column:codex_models;type:text"`
@@ -699,7 +701,7 @@ func (knowledgeSubmissionRow) TableName() string { return "knowledge_submissions
 // allModels lists every table for the sqlite test schema (AutoMigrate).
 func allModels() []any {
 	return []any{domain.BotUserBinding{}, domain.BotBindingChallenge{}, domain.BotConnection{}, domain.BotConversation{}, domain.BotInteraction{}, notificationBotRow{}, botCredentialRow{}, domain.NotificationDelivery{},
-		userRow{}, localAccountRow{}, userConfigRow{}, gitSSHKeyRow{}, authIntegrationRow{}, platformCodeBuddyKeyRow{}, apiTokenRow{}, genericTemplateRow{},
+		userRow{}, localAccountRow{}, userConfigRow{}, gitSSHKeyRow{}, authIntegrationRow{}, platformCodeBuddyKeyRow{}, platformKimiKeyRow{}, apiTokenRow{}, genericTemplateRow{},
 		insightSourceRow{}, insightExecutionRow{},
 		projectRow{}, projectMemberRow{}, repositoryRow{}, businessDomainRow{}, businessDomainAssignmentRow{},
 		agentRow{}, ruleRow{}, skillRow{}, skillFileRow{}, mcpServerRow{}, mcpFileRow{}, executorRow{},

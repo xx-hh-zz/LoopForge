@@ -189,6 +189,7 @@ func (h *usersHandlers) platformCodeBuddyKey(c *gin.Context) {
 		if !h.platformAdminWrite(c) {
 			return
 		}
+		// 🚨 修复：这里不要 provider，直接清理 CodeBuddy Key
 		if err := h.repo.ClearPlatformCodeBuddyKey(); err != nil {
 			respond(c, err)
 			return
@@ -259,4 +260,122 @@ func (h *usersHandlers) savePlatformCodeBuddyKey(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, h.repo.PlatformCodeBuddyKeyStatus())
+}
+
+
+// ==========================================
+// 新增：管理员配置 Kimi / DeepSeek 共享 Key 的接口
+// ==========================================
+
+type platformKimiKeyResponse struct {
+	repo.PlatformKimiKeyStatus
+	Catalog []assistantModel `json:"catalog"`
+}
+
+func (h *usersHandlers) platformKimiKey(c *gin.Context) {
+	switch c.Request.Method {
+	case http.MethodGet:
+		if !h.isPlatformAdmin(c.Request) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "只有平台管理员可以查看共享 Key"})
+			return
+		}
+		provider := normalizeKimiProvider(c.Query("provider"))
+		status := h.repo.PlatformKimiKeyStatus(provider)
+		c.JSON(http.StatusOK, platformKimiKeyResponse{PlatformKimiKeyStatus: status})
+	case http.MethodPut:
+		h.savePlatformKimiKey(c)
+	case http.MethodDelete:
+		if !h.platformAdminWrite(c) {
+			return
+		}
+		// 🚨 修复：在这里定义并使用 provider
+		provider := normalizeKimiProvider(c.Query("provider"))
+		if err := h.repo.ClearPlatformKimiKey(provider); err != nil {
+			respond(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, h.repo.PlatformKimiKeyStatus(provider))
+	default:
+		c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed"})
+	}
+}
+
+func (h *usersHandlers) savePlatformKimiKey(c *gin.Context) {
+	if !h.platformAdminWrite(c) {
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16<<10)
+	var input struct {
+		Provider string   `json:"provider"`
+		APIKey   string   `json:"apiKey"`
+		BaseURL  string   `json:"baseUrl"`
+		Models   []string `json:"models"`
+	}
+	if c.ShouldBindJSON(&input) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid shared key request"})
+		return
+	}
+	provider := normalizeKimiProvider(input.Provider)
+	
+	key := strings.TrimSpace(input.APIKey)
+	if len(key) > 4096 || strings.ContainsAny(key, " \t\r\n") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key 格式不正确"})
+		return
+	}
+	
+	// 默认使用 Kimi 官方 API 地址
+	baseURL := strings.TrimSpace(input.BaseURL)
+	if baseURL == "" {
+		if provider == "deepseek" {
+			baseURL = "https://api.deepseek.com/v1"
+		} else {
+			baseURL = "https://api.moonshot.cn/v1"
+		}
+	}
+
+	var models []string
+	seen := map[string]bool{}
+	for _, raw := range input.Models {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] {
+			continue
+		}
+		// 复用现有的模型正则校验
+		if !sharedModelPattern.MatchString(id) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "模型 ID 格式不正确：" + id})
+			return
+		}
+		seen[id] = true
+		models = append(models, id)
+	}
+	if len(models) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请至少选择一个允许使用的模型"})
+		return
+	}
+	
+	var actorID int64
+	if current, ok := h.requestUser(c.Request, true); ok {
+		actorID = current.ID
+	}
+	
+	// 调用我们在 repo 层写好的保存方法
+	err := h.repo.SetPlatformKimiKey(repo.PlatformKimiKeyUpdate{
+		Provider: provider,
+		APIKey:   key,
+		BaseURL:  baseURL,
+		Models:   models,
+	}, actorID)
+	
+	if err != nil {
+		respond(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, h.repo.PlatformKimiKeyStatus(provider))
+}
+
+func normalizeKimiProvider(provider string) string {
+	if strings.EqualFold(strings.TrimSpace(provider), "deepseek") {
+		return "deepseek"
+	}
+	return "kimi"
 }

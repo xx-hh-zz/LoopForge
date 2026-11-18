@@ -37,6 +37,8 @@ type userWithConfig struct {
 	AgentCLICredentials          *string    `gorm:"column:agent_cli_credentials"`
 	Created                      *time.Time `gorm:"column:created_at"`
 	Updated                      *time.Time `gorm:"column:updated_at"`
+	KimiAPIKey *string `gorm:"column:kimi_api_key"`
+	DeepSeekAPIKey *string `gorm:"column:deepseek_api_key"`
 }
 
 const userSelectColumns = `u.id, u.staff_id, u.login_name, u.chinese_name, u.dept_id, u.dept_name,
@@ -45,6 +47,8 @@ const userSelectColumns = `u.id, u.staff_id, u.login_name, u.chinese_name, u.dep
 	c.gongfeng_refresh_token, c.gongfeng_token_expires_at, c.codebuddy_api_key, COALESCE(c.codebuddy_internet_environment, '') AS codebuddy_internet_environment,
 	c.codex_api_key, c.codex_base_url, c.codex_models, c.claude_code_api_key, c.claude_code_base_url, c.claude_code_models,
 	c.agent_cli_credentials,
+	c.kimi_api_key,
+	c.deepseek_api_key,
 	u.created_at, u.updated_at`
 
 func (r userWithConfig) toDomain() domain.User {
@@ -62,6 +66,12 @@ func (r userWithConfig) toDomain() domain.User {
 	}
 	if r.GongfengTokenExpiresAt != nil {
 		u.GongfengTokenExpiresAt = *r.GongfengTokenExpiresAt
+	}
+	if r.KimiAPIKey != nil {
+    	u.KimiAPIKey = *r.KimiAPIKey
+	}
+	if r.DeepSeekAPIKey != nil {
+    	u.DeepSeekAPIKey = *r.DeepSeekAPIKey
 	}
 	if r.CodeBuddyAPIKey != nil {
 		u.CodeBuddyAPIKey = *r.CodeBuddyAPIKey
@@ -149,6 +159,7 @@ func (r *UsersRepo) PutUser(v domain.User) error {
 		if v.ID == 0 {
 			v.ID = old.ID
 		}
+		v.KimiAPIKey = old.KimiAPIKey
 		v.CreatedAt = old.CreatedAt
 		// Authentication refreshes identity fields only. Credentials are managed
 		// through UpdateUserCredentials and must survive every login refresh.
@@ -224,6 +235,7 @@ func (r *UsersRepo) writeUser(v domain.User) (domain.User, error) {
 
 func userHasConfig(user domain.User) bool {
 	return user.GitToken != "" ||
+		user.KimiAPIKey != "" ||
 		user.GongfengRefreshToken != "" ||
 		user.CodeBuddyAPIKey != "" ||
 		user.CodeBuddyInternetEnvironment != "" ||
@@ -239,6 +251,8 @@ func userHasConfig(user domain.User) bool {
 type UserCredentialUpdate struct {
 	GitToken                     string             `json:"gitToken"`
 	GitTokenClear                bool               `json:"gitTokenClear"`
+	KimiAPIKey string `json:"kimiApiKey"`
+	KimiAPIKeyClear bool `json:"kimiApiKeyClear"`
 	CodeBuddyAPIKey              string             `json:"codeBuddyApiKey"`
 	CodeBuddyAPIKeyClear         bool               `json:"codeBuddyApiKeyClear"`
 	CodeBuddyInternetEnvironment *string            `json:"codeBuddyInternetEnvironment"`
@@ -297,6 +311,11 @@ func (r *UsersRepo) UpdateUserCredentials(id int64, update UserCredentialUpdate)
 	} else if value := strings.TrimSpace(update.ClaudeCodeAPIKey); value != "" {
 		user.ClaudeCodeAPIKey = value
 	}
+	if update.KimiAPIKeyClear {
+		user.KimiAPIKey = ""
+	} else if value := strings.TrimSpace(update.KimiAPIKey); value != "" {
+		user.KimiAPIKey = value
+	}
 	if update.CodexBaseURL != nil {
 		user.CodexBaseURL = strings.TrimSpace(*update.CodexBaseURL)
 	}
@@ -351,6 +370,7 @@ func (r *UsersRepo) writeUserConfig(v domain.User) error {
 		"gongfeng_refresh_token": nullableString(v.GongfengRefreshToken), "gongfeng_token_expires_at": timePtr(v.GongfengTokenExpiresAt),
 		"codebuddy_api_key":              nullableString(v.CodeBuddyAPIKey),
 		"codebuddy_internet_environment": v.CodeBuddyInternetEnvironment,
+		"kimi_api_key": nullableString(v.KimiAPIKey),
 		"codex_api_key":                  nullableString(v.CodexAPIKey), "codex_base_url": nullableString(v.CodexBaseURL), "codex_models": encodeCLIModels(v.CodexModels),
 		"claude_code_api_key": nullableString(v.ClaudeCodeAPIKey), "claude_code_base_url": nullableString(v.ClaudeCodeBaseURL), "claude_code_models": encodeCLIModels(v.ClaudeCodeModels),
 		"agent_cli_credentials": encodeAgentCLICredentials(v.AgentCLICredentials),

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"strings"
 
 	"agentflow/internal/domain"
@@ -62,6 +63,50 @@ func (e *Engine) sponsoredExecutor(runID string, ex domain.ExecutorDefinition, m
 		})
 	}
 	return ex
+}
+
+// sharedAgentCLIExecutor applies the platform allow-list to shared DSH/Kimi
+// credentials. Unlike CodeBuddy's historical fallback, an explicitly
+// configured but disallowed model fails clearly instead of silently changing.
+func (e *Engine) sharedAgentCLIExecutor(runID string, ex domain.ExecutorDefinition, models []string, sink func(domain.TelemetryEvent)) (domain.ExecutorDefinition, error) {
+	models = append([]string(nil), models...)
+	if len(models) == 0 {
+		return ex, fmt.Errorf("平台共享 %s Key 未配置可用模型，请管理员检查共享 Key 设置", runtime.AgentCLILabel(ex.Kind))
+	}
+	configured := strings.TrimSpace(ex.Model)
+	if configured == "" || configured == "default" {
+		ex.Model = models[0]
+	} else {
+		allowed := false
+		for _, model := range models {
+			if configured == model {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return ex, fmt.Errorf("SOP 节点配置的 %s 模型 %q 不在平台共享 Key 允许列表中（%s）", runtime.AgentCLILabel(ex.Kind), configured, strings.Join(models, "、"))
+		}
+		ex.Model = configured
+	}
+
+	message := fmt.Sprintf("需求责任人未配置个人 %s API Key，本节点使用平台共享 Key，模型 %s", runtime.AgentCLILabel(ex.Kind), ex.Model)
+	if sink != nil {
+		sink(domain.TelemetryEvent{
+			Category: "model", Name: "model.shared", Phase: "start", Message: message,
+			Provider: ex.Kind, Model: ex.Model,
+			Attributes: map[string]any{"credentialSource": "platform_shared", "allowedModels": models},
+		})
+	}
+	eventType := "model.shared." + ex.Kind
+	if current, ok := e.repo.RunState(runID); ok && !hasRunEvent(current, eventType) {
+		e.updateRun(runID, func(r *domain.Run) {
+			if !hasRunEvent(*r, eventType) {
+				e.event(r, "", eventType, message)
+			}
+		})
+	}
+	return ex, nil
 }
 
 func hasRunEvent(run domain.Run, typ string) bool {

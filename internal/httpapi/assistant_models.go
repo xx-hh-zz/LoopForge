@@ -219,6 +219,7 @@ func (h *assistantHandlers) models(c *gin.Context) {
 		catalog.SponsoredModel, catalog.SponsoredModels = key.Models[0], key.Models
 	}
 	if signedIn {
+		user = h.addSharedAgentCLIKeys(user)
 		catalog.Models = append(catalog.Models, assistantEngineModels(c.Request.Context(), user)...)
 		catalog.Engines = assistantEngineOptions(user, shared && strings.TrimSpace(user.CodeBuddyAPIKey) == "")
 	}

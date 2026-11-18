@@ -1,14 +1,12 @@
 package repo
 
 import (
+	"agentflow/internal/domain"
 	"encoding/json"
 	"errors"
 	"os"
 	"strings"
 	"time"
-
-	"agentflow/internal/domain"
-
 	"gorm.io/gorm/clause"
 )
 
@@ -82,10 +80,8 @@ type PlatformCodeBuddyKeyStatus struct {
 	Models              []string   `json:"models"`
 	UpdatedAt           *time.Time `json:"updatedAt,omitempty"`
 	UpdatedBy           string     `json:"updatedBy,omitempty"`
-	// LegacySponsor is the account named by AGENTFLOW_ASSISTANT_SPONSOR_LOGIN
-	// whose key is lent while no shared key is configured here.
-	LegacySponsor      string `json:"legacySponsor,omitempty"`
-	LegacySponsorModel string `json:"legacySponsorModel,omitempty"`
+	LegacySponsor       string     `json:"legacySponsor,omitempty"`
+	LegacySponsorModel  string     `json:"legacySponsorModel,omitempty"`
 }
 
 // PlatformCodeBuddyKeyUpdate replaces the shared key settings. An empty
@@ -210,4 +206,145 @@ func (r *UsersRepo) SetPlatformCodeBuddyKey(update PlatformCodeBuddyKeyUpdate, a
 // key need one again (or fall back to the legacy sponsor account).
 func (r *UsersRepo) ClearPlatformCodeBuddyKey() error {
 	return r.DB.Where("id = ?", platformCodeBuddyKeyID).Delete(&platformCodeBuddyKeyRow{}).Error
+}
+
+// ==========================================
+// 新增：Kimi 与 DeepSeek 共享 Key 共存逻辑
+// ==========================================
+
+// 1. 定义表结构，增加 Provider
+type platformKimiKeyRow struct {
+	ID        int64      `gorm:"column:id;primaryKey;autoIncrement"`
+	Provider  string     `gorm:"column:provider;size:50;not null;default:'deepseek';uniqueIndex"`
+	APIKey    string     `gorm:"column:api_key;type:text;not null"`
+	BaseURL   string     `gorm:"column:base_url;size:255;not null;default:'https://api.moonshot.cn/v1'"`
+	Models    string     `gorm:"column:models;type:text;not null"`
+	UpdatedBy int64      `gorm:"column:updated_by;not null;default:0"`
+	Updated   *time.Time `gorm:"column:updated_at"`
+}
+
+func (platformKimiKeyRow) TableName() string { return "platform_kimi_keys" }
+
+// 2. 定义前端需要的状态结构体
+type PlatformKimiKeyStatus struct {
+	Configured bool       `json:"configured"`
+	Provider   string     `json:"provider"`
+	BaseURL    string     `json:"baseUrl"`
+	Models     []string   `json:"models"`
+	UpdatedAt  *time.Time `json:"updatedAt,omitempty"`
+	UpdatedBy  string     `json:"updatedBy,omitempty"`
+}
+
+type PlatformKimiKeyUpdate struct {
+	Provider string
+	APIKey  string
+	BaseURL string
+	Models  []string
+}
+
+func normalizeSharedKeyProvider(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider != "deepseek" {
+		return "kimi"
+	}
+	return provider
+}
+
+// 3. 内部查询方法（按 Provider 查询）
+func (r *UsersRepo) platformKimiKeyByProvider(provider string) (platformKimiKeyRow, bool) {
+	var row platformKimiKeyRow
+	if r == nil || r.deps == nil || r.DB == nil {
+		return row, false
+	}
+	result := r.DB.Where("provider = ?", provider).Limit(1).Find(&row)
+	return row, result.Error == nil && result.RowsAffected > 0
+}
+
+// 4. 核心方法：按 Provider 获取共享 Key
+func (r *UsersRepo) SharedKeyByProvider(provider string) (SharedCodeBuddyKey, bool) {
+	provider = normalizeSharedKeyProvider(provider)
+	row, ok := r.platformKimiKeyByProvider(provider)
+
+	if ok {
+		models := decodeSharedModels(row.Models)
+		if strings.TrimSpace(row.APIKey) != "" && len(models) > 0 {
+			return SharedCodeBuddyKey{
+				APIKey:              row.APIKey,
+				InternetEnvironment: row.BaseURL,
+				Models:              models,
+			}, true
+		}
+	}
+	return SharedCodeBuddyKey{}, false
+}
+
+// 5. 兼容旧代码：如果其他地方还在调 SharedKimiKey，默认查 deepseek
+func (r *UsersRepo) SharedKimiKey() (SharedCodeBuddyKey, bool) {
+	return r.SharedKeyByProvider("deepseek")
+}
+
+// 6. 获取状态（默认查 kimi 的状态给管理员看）
+func (r *UsersRepo) PlatformKimiKeyStatus(provider ...string) PlatformKimiKeyStatus {
+	selectedProvider := "kimi"
+	if len(provider) > 0 {
+		selectedProvider = normalizeSharedKeyProvider(provider[0])
+	}
+	status := PlatformKimiKeyStatus{Provider: selectedProvider, Models: []string{}}
+	if row, ok := r.platformKimiKeyByProvider(selectedProvider); ok && strings.TrimSpace(row.APIKey) != "" {
+		status.Configured = true
+		status.BaseURL = row.BaseURL
+		if models := decodeSharedModels(row.Models); models != nil {
+			status.Models = models
+		}
+		status.UpdatedAt = row.Updated
+		if user, ok := r.User(row.UpdatedBy); ok {
+			status.UpdatedBy = user.LoginName
+		}
+	}
+	return status
+}
+
+// 7. 保存配置（智能判断 Provider 并 Upsert）
+func (r *UsersRepo) SetPlatformKimiKey(update PlatformKimiKeyUpdate, actorID int64) error {
+	if len(update.Models) == 0 {
+		return ErrSharedCodeBuddyModelsRequired
+	}
+	
+	provider := normalizeSharedKeyProvider(update.Provider)
+	baseURL := strings.TrimSpace(update.BaseURL)
+	if baseURL == "" && provider == "deepseek" {
+		baseURL = "https://api.deepseek.com/v1"
+	} else if baseURL == "" {
+		baseURL = "https://api.moonshot.cn/v1"
+	}
+
+	row, _ := r.platformKimiKeyByProvider(provider)
+	if key := strings.TrimSpace(update.APIKey); key != "" {
+		row.APIKey = key
+	}
+	if strings.TrimSpace(row.APIKey) == "" {
+		return ErrSharedCodeBuddyKeyRequired
+	}
+	models, err := json.Marshal(update.Models)
+	if err != nil {
+		return err
+	}
+	
+	now := time.Now().UTC()
+	row.Provider = provider
+	row.BaseURL = baseURL
+	row.Models = string(models)
+	row.UpdatedBy = actorID
+	row.Updated = &now
+
+	// 存在则更新，不存在则插入
+	if row.ID > 0 {
+		return r.DB.Save(&row).Error
+	}
+	return r.DB.Create(&row).Error
+}
+
+// ClearPlatformKimiKey 删除指定 Provider 的共享 Key
+func (r *UsersRepo) ClearPlatformKimiKey(provider string) error {
+	return r.DB.Where("provider = ?", normalizeSharedKeyProvider(provider)).Delete(&platformKimiKeyRow{}).Error
 }

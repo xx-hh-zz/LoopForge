@@ -232,6 +232,30 @@ func (e *Engine) resolveRunCredentials(run domain.Run) runtime.RunCredentials {
 		credentials.Codex = runtime.ProviderCredential{APIKey: user.CodexAPIKey, BaseURL: user.CodexBaseURL}
 		credentials.ClaudeCode = runtime.ProviderCredential{APIKey: user.ClaudeCodeAPIKey, BaseURL: user.ClaudeCodeBaseURL}
 		credentials.AgentCLI = runtime.AgentCLIUserCredentials(user)
+		if credentials.AgentCLI == nil {
+			credentials.AgentCLI = make(map[string]runtime.ProviderCredential)
+		}
+		// SOP Agent CLIs prefer the responsible user's own key. If it is
+		// absent, borrow only the matching platform key for DSH or Kimi Code.
+		for kind, provider := range map[string]string{"dsh": "deepseek", "kimi": "kimi"} {
+			if strings.TrimSpace(credentials.AgentCLI[kind].APIKey) != "" {
+				continue
+			}
+			shared, found := e.repo.SharedKeyByProvider(provider)
+			if !found {
+				continue
+			}
+			credentials.AgentCLI[kind] = runtime.ProviderCredential{
+				APIKey:        shared.APIKey,
+				BaseURL:       shared.InternetEnvironment,
+				Protocol:      runtime.AgentCLIProtocol(kind, ""),
+				Shared:        true,
+			}
+			if credentials.SharedAgentCLIModels == nil {
+				credentials.SharedAgentCLIModels = make(map[string][]string)
+			}
+			credentials.SharedAgentCLIModels[kind] = append([]string(nil), shared.Models...)
+		}
 	}
 	scriptAssets, _, _ := runtime.PrepareMCPServers(e.resolveScriptMCPAssets(run.ExecutionContext.ProjectID, userID), runtime.MCPTarget{GitToken: credentials.GitToken})
 	credentials.MCPServers = scriptAssets.MCPServers

@@ -230,6 +230,50 @@ func TestPlatformAdminsConfigureSharedCodeBuddyKey(t *testing.T) {
 	}
 }
 
+func TestPlatformAdminsConfigureKimiAndDeepSeekSharedKeys(t *testing.T) {
+	s, client, owner, _ := platformSettingsFixture(t)
+	const origin = "http://localhost"
+	for _, tc := range []struct {
+		provider string
+		baseURL  string
+		model    string
+	}{
+		{provider: "kimi", baseURL: "https://api.moonshot.cn/v1", model: "kimi-k2.6"},
+		{provider: "deepseek", baseURL: "https://api.deepseek.com/v1", model: "deepseek-chat"},
+	} {
+		body, _ := json.Marshal(map[string]any{
+			"provider": tc.provider, "apiKey": "secret-" + tc.provider,
+			"baseUrl": tc.baseURL, "models": []string{tc.model},
+		})
+		path := "/api/platform/kimi-key"
+		w := client.call(owner, "PUT", path, origin, string(body))
+		var saved repo.PlatformKimiKeyStatus
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &saved) != nil || !saved.Configured || saved.Provider != tc.provider || saved.BaseURL != tc.baseURL || strings.Join(saved.Models, ",") != tc.model {
+			t.Fatalf("save %s: %d %s", tc.provider, w.Code, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "secret-"+tc.provider) {
+			t.Fatalf("%s response revealed the key: %s", tc.provider, w.Body.String())
+		}
+		w = client.call(owner, "GET", path+"?provider="+tc.provider, "", "")
+		var loaded repo.PlatformKimiKeyStatus
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &loaded) != nil || !loaded.Configured || loaded.Provider != tc.provider || loaded.BaseURL != tc.baseURL || strings.Join(loaded.Models, ",") != tc.model {
+			t.Fatalf("load %s: %d %s", tc.provider, w.Code, w.Body.String())
+		}
+		body, _ = json.Marshal(map[string]any{
+			"provider": tc.provider, "apiKey": "", "baseUrl": tc.baseURL + "/custom",
+			"models": []string{tc.model, "custom-model"},
+		})
+		w = client.call(owner, "PUT", path, origin, string(body))
+		if w.Code != 200 {
+			t.Fatalf("update %s with blank key: %d %s", tc.provider, w.Code, w.Body.String())
+		}
+		shared, ok := s.SharedKeyByProvider(tc.provider)
+		if !ok || shared.APIKey != "secret-"+tc.provider || strings.Join(shared.Models, ",") != tc.model+",custom-model" {
+			t.Fatalf("updated %s key = %+v, ok=%v", tc.provider, shared, ok)
+		}
+	}
+}
+
 func itoa(v int64) string {
 	b, _ := json.Marshal(v)
 	return string(b)

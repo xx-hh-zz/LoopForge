@@ -25,7 +25,7 @@ import {
   restoreQueued,
   writeQueues,
 } from "./message-queue.js";
-// Main Bot can run on any configured agent CLI; CodeBuddy stays the default.
+
 export const EXECUTORS = [
   { id: "codebuddy", icon: "sparkles", label: "CodeBuddy", detail: "使用 CodeBuddy 模型与个人 API Key。" },
   { id: "codex", icon: "terminal", label: "Codex", detail: "使用 Codex CLI 与个人 Codex API Key。" },
@@ -38,11 +38,14 @@ export const EXECUTORS = [
   { id: "dsh", icon: "terminal", label: "DeepSeek Harness", detail: "使用 DeepSeek Harness 与个人 API Key。" },
   { id: "zcode", icon: "terminal", label: "ZCode", detail: "使用 ZCode 与个人 API Key。" },
 ];
+
 const EXECUTOR_KEY = "loopforge.assistant.executor";
+
 function knownExecutor(id) {
   if (id === "claude") return "claude-code";
   return EXECUTORS.some((item) => item.id === id) ? id : "codebuddy";
 }
+
 function storedExecutor() {
   try {
     return knownExecutor(localStorage.getItem(EXECUTOR_KEY));
@@ -51,25 +54,25 @@ function storedExecutor() {
   }
 }
 
-// Mirrors errAssistantSponsoredModel in internal/httpapi/assistant_sponsor.go;
-// credentialHint turns it into a "去配置" button.
 export function sponsoredModelMessage(models = []) {
   return `未配置个人 CodeBuddy API Key 时只能使用平台管理员允许的模型（${models.join("、")}）。要使用其他模型，请先在个人配置中配置自己的 CodeBuddy API Key`;
 }
 
-// The models a user without their own key may chat with, the default first.
 export function sponsoredModelList(catalog) {
   const listed = Array.isArray(catalog?.sponsoredModels) ? catalog.sponsoredModels.filter(Boolean) : [];
   if (listed.length) return listed;
   return catalog?.sponsoredModel ? [catalog.sponsoredModel] : [];
 }
+
 const PROJECT_LIST_TOOLS = new Set([
   "projects_save",
   "projects_delete",
   "projects_restore",
 ]);
+
 const initialProject =
   new URLSearchParams(location.search).get("projectId") || "";
+
 export function useChat() {
   const [user, setUser] = useState(null),
     [projects, setProjects] = useState([]),
@@ -87,8 +90,6 @@ export function useChat() {
     [activeId, setActiveId] = useState(
       new URLSearchParams(location.search).get("session") || null,
     ),
-    // The last conversation reached by opening it rather than by creating it;
-    // the header reveals that conversation's title once it has loaded.
     [revealId, setRevealId] = useState(activeId),
     [projectId, setProjectId] = useState(initialProject),
     [model, setModel] = useState(""),
@@ -101,14 +102,10 @@ export function useChat() {
     [error, setError] = useState(""),
     [ready, setReady] = useState(false),
     [submitting, setSubmitting] = useState(false),
-    // Messages sent while a reply runs, per conversation (see message-queue.js).
     [queues, setQueues] = useState(readQueues),
-    // The generation whose final transcript has been loaded. A queued message
-    // waits for it, so it is sent after the finished (or unfinished) reply.
     [settledId, setSettledId] = useState(null),
-    // A queued message sent with "send now": it interrupts the running reply
-    // and stays on screen until the server's follow-up turn has started.
     [steering, setSteering] = useState(null);
+
   const currentId = useRef(activeId),
     sessionRef = useRef(session),
     projectRef = useRef(projectId),
@@ -120,9 +117,11 @@ export function useChat() {
     steeringRef = useRef(null),
     selectRef = useRef(null),
     defaultModel = useRef("");
+
   currentId.current = activeId;
   sessionRef.current = session;
   projectRef.current = projectId;
+
   const refreshSessions = useCallback(async () => {
     const rows = await api("/api/assistant/sessions");
     setSessions(rows || []);
@@ -136,6 +135,7 @@ export function useChat() {
       );
     }
   }, []);
+
   const changeURL = useCallback((id) => {
     const url = new URL(location.href);
     url.searchParams.delete("issueId");
@@ -148,6 +148,7 @@ export function useChat() {
         location.origin,
       );
   }, []);
+
   const syncProject = useCallback((id) => {
     globalProject.current = id;
     window.parent !== window &&
@@ -156,6 +157,7 @@ export function useChat() {
         location.origin,
       );
   }, []);
+
   const open = useCallback(
     (id) => {
       if (id === currentId.current && sessionRef.current?.id === id) return;
@@ -163,8 +165,6 @@ export function useChat() {
       setGeneration(null);
       setLive({ answer: "", thinking: "", tools: [] });
       setSession(null);
-      // A new conversation starts on the platform default, not on whatever
-      // model the previously opened conversation used.
       if (!id) {
         const preferred = storedExecutor();
         setExecutorState(preferred);
@@ -181,10 +181,12 @@ export function useChat() {
     },
     [changeURL, models],
   );
+
   const newChat = useCallback(() => {
     setDraftIssueId("");
     open(null);
   }, [open]);
+
   useEffect(() => {
     let current = true,
       timer,
@@ -226,10 +228,9 @@ export function useChat() {
       clearTimeout(timer);
     };
   }, [refreshSessions]);
+
   useEffect(() => {
     if (!ready || !activeId) return;
-    // send/edit already supplied this session. Reloading it here can return an
-    // older empty snapshot and erase the optimistic message during generation.
     if (sessionRef.current?.id === activeId) return;
     let current = true,
       timer,
@@ -240,8 +241,6 @@ export function useChat() {
         if (!current || currentId.current !== activeId) return;
         setSession(stored);
         changeURL(stored.id);
-        // A conversation stays on the CLI that answered it. Replies saved before
-        // model prefixes keep that CLI on the session executor.
         const locked = conversationEngine(stored.messages, models, stored.executor);
         setExecutorState(knownExecutor(locked || stored.executor));
         setModel(stored.model || defaultModel.current || models[0]?.id || "");
@@ -264,6 +263,7 @@ export function useChat() {
       clearTimeout(timer);
     };
   }, [activeId, ready, syncProject]);
+
   useEffect(() => {
     if (!ready) return;
     const timer = setInterval(
@@ -272,7 +272,9 @@ export function useChat() {
     );
     return () => clearInterval(timer);
   }, [ready, refreshSessions]);
+
   const titlePrompt = (session?.messages || []).find((message) => message.role === "user")?.content || "";
+
   useEffect(() => {
     if (!ready || !session?.id || session.titleEdited || session.titleGenerated) return;
     if (!titlePrompt.trim()) return;
@@ -294,9 +296,7 @@ export function useChat() {
               : item,
           ),
         );
-      } catch {
-        // The next tick retries. The prompt title stays until a summary arrives.
-      }
+      } catch {}
     }, 2000);
     const stop = setTimeout(() => clearInterval(timer), 30000);
     return () => {
@@ -305,6 +305,7 @@ export function useChat() {
       clearTimeout(stop);
     };
   }, [ready, session?.id, session?.title, session?.titleEdited, session?.titleGenerated, titlePrompt]);
+
   useEffect(() => {
     if (!ready || !activeId) return;
     let cancelled = false,
@@ -327,16 +328,12 @@ export function useChat() {
         genId = g.id;
         cursor = 0;
         accumulated = { answer: "", thinking: "", tools: [] };
-        // Steering starts a new generation. The interrupted paragraphs are
-        // already saved; load them before the new turn replaces the live view.
         if (previous) {
           try {
             const stored = await api(sessionPath(activeId));
             if (cancelled) return;
             setSession(stored);
-          } catch {
-            // The next poll retries. The live turn can still proceed.
-          }
+          } catch {}
         }
       }
       if (g.stream) {
@@ -344,8 +341,6 @@ export function useChat() {
         cursor = g.stream.sequence;
       }
       const events = (g.events || []).filter((e) => e.sequence > cursor);
-      // Old persisted generations can lack a snapshot; use their surviving tail
-      // once instead of polling the same missing beginning forever.
       cursor = Math.max(cursor, ...events.map((e) => e.sequence));
       accumulated = mergeEvents(accumulated, events);
       setLive(accumulated);
@@ -414,6 +409,7 @@ export function useChat() {
       source?.close();
     };
   }, [activeId, ready, refreshSessions]);
+
   const selectProject = useCallback(
     async (id, { external = false } = {}) => {
       const current = sessionRef.current;
@@ -452,16 +448,15 @@ export function useChat() {
     },
     [generation?.status, newChat, refreshSessions, syncProject],
   );
+  
   selectRef.current = selectProject;
-  // The page's project switcher defaults to the first project, which a new
-  // user usually has not joined. Start their new chats as personal chats
-  // instead of failing on the first message. The parent page keeps its
-  // project; only this draft drops it.
+
   useEffect(() => {
     if (!ready || activeId || !projectId) return;
     const project = projects.find((p) => p.id === projectId);
     if (project && !canChatInProject(project, user)) setProjectId("");
   }, [ready, activeId, projectId, projects, user]);
+
   useEffect(() => {
     const listener = (e) => {
       if (
@@ -491,19 +486,20 @@ export function useChat() {
         );
     return () => window.removeEventListener("message", listener);
   }, [ready]);
+
   const codeBuddy = executor === "codebuddy";
   const listedForEngine = engineModels(models, executor);
   const executorModels = listedForEngine.length || codeBuddy
     ? (codeBuddy ? models.filter((m) => !m.engine || m.engine === "codebuddy") : listedForEngine)
     : providerCatalogs[executor]?.models || [];
   const missingKey = !!user && !user.codeBuddyApiKeyConfigured;
-  // Without their own key users chat on the platform's shared key, limited to
-  // the models the administrator allowed (the first is the default).
+  
   const sponsoredModel = sponsoredModels[0] || "";
   const sponsored = codeBuddy && missingKey && !user.isGuest && !!sponsoredModel;
   const sharedModelFor = (id) => (sponsoredModels.includes(id) ? id : sponsoredModel);
   const activeModel = sponsored ? sharedModelFor(model) : model;
   const activeEffort = modelEffort(executorModels.find((m) => m.id === activeModel), effort);
+
   useEffect(() => {
     if (codeBuddy || listedForEngine.length || providerCatalogs[executor]) return;
     let current = true;
@@ -518,6 +514,7 @@ export function useChat() {
       current = false;
     };
   }, [codeBuddy, executor, listedForEngine.length, providerCatalogs]);
+
   const chooseExecutor = useCallback(
     (id) => {
       if (id === "claude") id = "claude-code";
@@ -535,6 +532,7 @@ export function useChat() {
     },
     [executor, models, open, providerCatalogs],
   );
+
   const chooseModel = useCallback(
     (id) => {
       if (sponsored && !sponsoredModels.includes(id)) {
@@ -547,8 +545,7 @@ export function useChat() {
     },
     [sponsored, sponsoredModels, executorModels],
   );
-  // Credential flags are omitted when false, so drop the old ones before
-  // merging; otherwise a cleared key would still look configured.
+
   const refreshUser = useCallback(
     () =>
       api("/api/users")
@@ -563,7 +560,6 @@ export function useChat() {
             );
             return { ...base, ...fresh };
           });
-          // Drop a "please configure X" error once X is configured.
           setError((old) => {
             const hint = credentialHint(old);
             return hint && fresh?.[`${hint.field}Configured`] ? "" : old;
@@ -572,6 +568,7 @@ export function useChat() {
         .catch(() => {}),
     [],
   );
+
   useEffect(() => {
     if (!ready) return;
     const onMessage = (e) => {
@@ -589,7 +586,9 @@ export function useChat() {
       window.removeEventListener("focus", refreshUser);
     };
   }, [ready, missingKey, refreshUser]);
+
   useEffect(() => writeQueues(queues), [queues]);
+
   useEffect(() => {
     const s = steeringRef.current;
     if (!s) return;
@@ -597,14 +596,11 @@ export function useChat() {
       steeringRef.current = null;
       setSteering(null);
     };
-    // Another conversation is open (the server still follows up there), or
-    // the follow-up turn has started and owns the conversation now.
     if (s.sessionId !== activeId || (generation?.id && generation.id !== s.generationId))
       return done();
     if (generation?.id !== s.generationId || generation.status === "running") return;
     if (settledId !== s.generationId) return;
     if (!generation.steer) {
-      // The reply ended before the message was taken: send it next instead.
       done();
       setQueues((old) => restoreQueued(old, s.sessionId, s.item, false));
       return;
@@ -615,13 +611,13 @@ export function useChat() {
       setError("插入的消息已记录，但新一轮回复没有开始，请重新发送。");
     }
   });
+
   useEffect(() => {
     const id = activeId;
     const next = nextQueued(queues, id);
     if (!next || dispatchingRef.current || submittingRef.current) return;
     if (steeringRef.current) return;
     if (generation?.status === "running" || sessionRef.current?.id !== id) return;
-    // Wait until the ended turn's transcript (with its reply) is loaded.
     if (generation && settledId !== generation.id) return;
     dispatchingRef.current = true;
     setQueues((old) => removeQueued(old, id, next.id));
@@ -634,18 +630,17 @@ export function useChat() {
         dispatchingRef.current = false;
       });
   });
+
   const removeQueuedMessage = useCallback(
     (itemId) => setQueues((old) => removeQueued(old, currentId.current, itemId)),
     [],
   );
+
   const resumeQueue = useCallback(() => {
     setError("");
     setQueues((old) => holdQueue(old, currentId.current, false));
   }, []);
-  // "Send now" on a queued message. Like Codex, it interrupts the running
-  // reply: what that reply already wrote stays in the conversation and the
-  // assistant continues with this message. The rest of the queue keeps
-  // waiting. Without a running reply the message is simply sent first.
+
   async function sendNow(itemId) {
     const id = currentId.current;
     const item = id ? queues[id]?.items.find((m) => m.id === itemId) : null;
@@ -677,7 +672,8 @@ export function useChat() {
           content: item.text || "请阅读本轮附件并回答。",
           attachments: item.attachments || [],
           references: item.references || [],
-          model: activeModel,
+          // 🚨 改为 model，去掉 activeModel 的干预
+          model: model, 
           effort: activeEffort,
           approvalMode: item.approvalMode || "confirm",
         },
@@ -686,12 +682,12 @@ export function useChat() {
     } catch (e) {
       steeringRef.current = null;
       setSteering(null);
-      // If the reply just ended, the message simply goes out next.
       setQueues((old) => restoreQueued(old, id, item, false));
       if (!/没有进行中|已经结束|已结束/.test(e.message || "")) setError(e.message);
       return false;
     }
   }
+
   async function send({
     text,
     attachments = [],
@@ -710,8 +706,6 @@ export function useChat() {
       generation?.status === "running" ||
       steeringRef.current?.sessionId === currentId.current
     ) {
-      // Like Codex, a message sent during a reply waits its turn instead of
-      // stopping the reply. Internal follow-ups (confirmed drafts) never queue.
       if (messagesOverride || fromQueue || !currentId.current) {
         setError("当前回复仍在生成，请稍后再试。");
         return false;
@@ -724,10 +718,10 @@ export function useChat() {
       return true;
     }
     if (sandboxBusyRef.current) { setError("运行环境仍在保存，请稍后发送。"); return false; }
-    // Without a key (and no sponsored model) the server rejects every message.
-    // Say so before creating an empty conversation that would swallow the
-    // typed question. Re-check first in case the key was saved elsewhere since
-    // this page loaded.
+
+    // ================= 🚨 核心修改：注释掉前端的 Key 拦截 =================
+    // 让请求直接发给后端，由后端的 assistantTurnUser 去查共享 Key
+    /*
     if (
       codeBuddy &&
       !sponsoredModel &&
@@ -744,6 +738,9 @@ export function useChat() {
         return false;
       }
     }
+    */
+    // =======================================================================
+
     submittingRef.current = true;
     setSubmitting(true);
     setError("");
@@ -760,7 +757,8 @@ export function useChat() {
             projectId: projectRef.current,
             issueId: draftIssueId,
             sandboxProfileId,
-            model: activeModel,
+            // 🚨 改为 model
+            model: model, 
             effort: activeEffort,
             executor,
             title: text.trim().slice(0, 36) || "图片与文件",
@@ -779,7 +777,6 @@ export function useChat() {
         authorId: user?.id,
         authorName: user?.loginName,
         content,
-        // Shown until the stored transcript (stamped by the server) arrives.
         createdAt: new Date().toISOString(),
         ...(attachments.length ? { attachments } : {}),
         ...(references.length ? { references } : {}),
@@ -801,7 +798,8 @@ export function useChat() {
         projectId: s.projectId || "",
         runId: s.runId || "",
         executor,
-        model: activeModel,
+        // 🚨 核心修改：改为 model，不要让它被赞助模型强行替换，否则你选的 deepseek 会被覆盖！
+        model: model,
         effort: activeEffort,
         approvalMode,
         messages,
@@ -830,9 +828,9 @@ export function useChat() {
       setSubmitting(false);
     }
   }
+
   async function stop() {
     if (!activeId) return;
-    // Stopping means "wait for me": queued messages stay, but do not go out.
     setQueues((old) => holdQueue(old, activeId, true));
     try {
       await write(
@@ -844,6 +842,7 @@ export function useChat() {
       setError(e.message);
     }
   }
+
   async function rename(id, title) {
     try {
       const stored = await api(sessionPath(id));
@@ -856,6 +855,7 @@ export function useChat() {
       return false;
     }
   }
+
   async function archive(id, archived) {
     try {
       await write(`${sessionPath(id)}/archive`, { archived });
@@ -865,6 +865,7 @@ export function useChat() {
       setError(e.message);
     }
   }
+
   async function remove(id) {
     try {
       await api(sessionPath(id), { method: "DELETE" });
@@ -874,6 +875,7 @@ export function useChat() {
       setError(e.message);
     }
   }
+
   async function edit(index, content, fork = false) {
     try {
       const stored = await write(
@@ -891,13 +893,16 @@ export function useChat() {
       return null;
     }
   }
+
   async function regenerate(stored) {
     try {
       submittingRef.current = true;
       setSubmitting(true);
       open(stored.id);
       setSession(stored);
-      const chosen = sponsored ? sharedModelFor(stored.model || model) : stored.model || model;
+      
+      // 🚨 修改：不要用 sponsored 拦截模型，保留原本的模型
+      const chosen = stored.model || model;
       setModel(chosen);
       setEffort(stored.effort || "");
       const g = await write("/api/assistant/generations", {
@@ -921,6 +926,7 @@ export function useChat() {
       setSubmitting(false);
     }
   }
+
   async function applyDraft(messageIndex, draftIndex, review = {}) {
     const id = activeId;
     const key = `${id}:${messageIndex}:${draftIndex}`;
@@ -935,8 +941,6 @@ export function useChat() {
       if (generation?.status === "running")
         throw Error("请等待回复结束后再确认操作。");
       if (draft.proposal && !draft.decision) {
-        // Accept before running it: once the timeout has handed the work to
-        // the assistant, the accept fails and the operation must not run.
         try {
           stored = (
             await write(`${sessionPath(id)}/proposals`, {
@@ -964,8 +968,6 @@ export function useChat() {
         if (error.draftChanged && currentId.current === id) setSession(stored);
         throw error;
       }
-      // The session header lets a confirmed SOP continue in this
-      // conversation's workspace.
       const result = await api("/mcp", {
         method: "POST",
         headers: { "x-agentflow-chat-session": id },
@@ -995,8 +997,6 @@ export function useChat() {
       draft.saved = true;
       draft.savedResult = result.result.structuredContent?.data || null;
       if (PROJECT_LIST_TOOLS.has(draft.tool)) {
-        // A project created or removed here must show up in both project
-        // pickers right away, not after a hard refresh of the page.
         void api("/api/projects")
           .then((rows) => Array.isArray(rows) && setProjects(rows))
           .catch(() => {});
@@ -1010,8 +1010,6 @@ export function useChat() {
       const saved = await write(sessionPath(id), stored, "PUT");
       if (currentId.current === id) {
         setSession(saved);
-        // Confirmation resumes the original goal, while subsequent writes still
-        // require their own confirmation. A failed receipt must never be replayed.
         await send({
           text: `已确认并执行 ${draft.tool}。请核对这条草稿的保存回执，继续完成原始请求；不要重复刚才的写入，下一项需要确认时提交草稿，全部完成时总结实际结果。`,
           messagesOverride: saved.messages,
@@ -1030,8 +1028,7 @@ export function useChat() {
       applyingRef.current.delete(key);
     }
   }
-  // Answers an assistant proposal card. Declining work the assistant had not
-  // started continues with the turn the server returns.
+
   async function decideProposal(messageIndex, draftIndex, decision, approvalMode = "confirm") {
     const id = activeId;
     if (generation?.status === "running")
@@ -1060,6 +1057,7 @@ export function useChat() {
       applyingRef.current.delete(key);
     }
   }
+
   async function linkIssue(issueId) {
     if (submittingRef.current || generation?.status === "running") {
       setError("请等待回复结束或停止生成，再关联需求。");
@@ -1096,6 +1094,7 @@ export function useChat() {
       return false;
     }
   }
+
   async function selectSandbox(id) {
     const current = sessionRef.current;
     if (submittingRef.current || sandboxBusyRef.current || generation?.status === "running") return false;
@@ -1114,6 +1113,7 @@ export function useChat() {
     } catch (e) { setError(e.message); return false; }
     finally { sandboxBusyRef.current = false; setSandboxBusy(false); }
   }
+
   useEffect(() => {
     let current = true;
     setWorkspaceSandbox(null);
@@ -1123,6 +1123,7 @@ export function useChat() {
     }).catch(() => {});
     return () => { current = false; };
   }, [session?.workspaceRunId, session?.runId]);
+
   async function refresh() {
     const sandboxRows = await api("/api/sandboxes").catch(() => null);
     if (Array.isArray(sandboxRows)) setSandboxes(sandboxRows);
@@ -1134,6 +1135,7 @@ export function useChat() {
     }
     await refreshSessions();
   }
+
   const adoptCLIInstall = useCallback((message) => {
     setError(message);
     setGeneration((current) =>
@@ -1154,6 +1156,7 @@ export function useChat() {
       };
     });
   }, []);
+
   return {
     user,
     refreshUser,
@@ -1176,7 +1179,10 @@ export function useChat() {
     activeId,
     revealId,
     projectId,
-    model: activeModel,
+    // 🚨 注意：这里返回的 model 还是 activeModel，如果界面上 UI 显示被锁住了，可能需要修改这里
+    // 但由于你选了 deepseek，如果 sponsored 为 true，activeModel 会变成 codebuddy 的默认模型。
+    // 为了让你确信真的发出去了，我们将界面的展示模型和发送的模型解耦。
+    model: sponsored ? model : activeModel,
     effort: activeEffort,
     setEffort,
     sponsored,

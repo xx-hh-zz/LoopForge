@@ -1,5 +1,6 @@
 # Only HEAD and refs enter the context so a plain `docker build` can stamp the
 # commit without a --build-arg. The build stage still excludes .git.
+.data
 .git
 !.git/HEAD
 !.git/refs
@@ -29,3 +30,9 @@ e2e/test-results
 **/__pycache__
 **/.venv
 **/*.pyc
+
+# Runtime state can contain Docker auth files and private workspace data.
+.data/**
+
+.data
+.data/**

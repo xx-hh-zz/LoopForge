@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # The chatbot bundle and the Go binaries are architecture independent to build,
 # so those stages run on the builder's own platform and Go cross-compiles for
 # TARGETARCH. Only the final stage runs as the target (emulated for arm64 on an
@@ -18,6 +17,7 @@ WORKDIR /src
 ARG LOOPFORGE_BUILD_JOBS=
 ENV LOOPFORGE_BUILD_JOBS=${LOOPFORGE_BUILD_JOBS}
 COPY go.mod go.sum ./
+ENV GOPROXY=https://goproxy.cn,direct
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 # Ref updates must not invalidate the Go build cache.
 COPY --exclude=.git . .

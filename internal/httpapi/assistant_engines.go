@@ -32,7 +32,7 @@ const (
 
 // assistantCLIEngines are the CLIs other than CodeBuddy, in switch order.
 func assistantCLIEngines() []string {
-	return append([]string{assistantEngineCodex, assistantEngineClaude}, runtime.AgentCLIKinds...)
+	return append([]string{assistantEngineCodex, assistantEngineClaude, "kimi"}, runtime.AgentCLIKinds...)
 }
 
 func assistantModelEngine(id string) (engine, model string) {
@@ -75,6 +75,7 @@ func assistantEngineOptions(user domain.User, sponsored bool) []assistantEngineO
 	out := make([]assistantEngineOption, 0, len(engines))
 	for _, engine := range engines {
 		key, _ := assistantEngineCredential(user, engine)
+
 		out = append(out, assistantEngineOption{
 			ID:         engine,
 			Name:       assistantEngineLabel(engine),
@@ -93,6 +94,10 @@ func assistantEngineLabel(engine string) string {
 		return "Claude Code"
 	case assistantEngineCodeBuddy, "":
 		return "CodeBuddy"
+	case "deepseek", "dsh":
+		return "DeepSeek"
+	case "kimi":
+		return "Kimi"
 	}
 	return runtime.AgentCLILabel(engine)
 }
@@ -110,7 +115,42 @@ func assistantEngineCredential(user domain.User, engine string) (apiKey, baseURL
 	if runtime.IsAgentCLI(engine) && engine != runtime.AgentCLICursor {
 		baseURL = strings.TrimSpace(cred.BaseURL)
 	}
+
+	lowerEngine := strings.ToLower(engine)
+	if strings.Contains(lowerEngine, "kimi") || strings.Contains(lowerEngine, "moonshot") {
+		return strings.TrimSpace(cred.APIKey), strings.TrimSpace(cred.BaseURL)
+	}
+	if strings.Contains(lowerEngine, "deepseek") {
+		return strings.TrimSpace(cred.APIKey), strings.TrimSpace(cred.BaseURL)
+	}
+
 	return strings.TrimSpace(cred.APIKey), baseURL
+}
+
+// addSharedAgentCLIKeys makes platform keys available to chat model discovery
+// and execution. A user's personal key always takes precedence.
+func (h *assistantHandlers) addSharedAgentCLIKeys(user domain.User) domain.User {
+	if user.AgentCLICredentials == nil {
+		user.AgentCLICredentials = map[string]domain.AgentCLICredential{}
+	}
+	for provider, cli := range map[string]string{"kimi": runtime.AgentCLIKimi, "deepseek": runtime.AgentCLIDeepSeek} {
+		if key, _ := assistantEngineCredential(user, cli); key != "" {
+			continue
+		}
+		shared, ok := h.repo.SharedKeyByProvider(provider)
+		if !ok {
+			continue
+		}
+		models := make([]domain.CLIModel, 0, len(shared.Models))
+		for _, id := range shared.Models {
+			models = append(models, domain.CLIModel{ID: id, Name: id})
+		}
+		user.AgentCLICredentials[cli] = domain.AgentCLICredential{
+			APIKey: shared.APIKey, BaseURL: shared.InternetEnvironment,
+			Protocol: runtime.AgentCLIProtocolChat, Models: models,
+		}
+	}
+	return user
 }
 
 // assistantEngineProtocol is the API protocol an agent CLI speaks; "" for
@@ -170,9 +210,6 @@ func assistantValidEngineModel(model string) bool {
 // own reply, "" before the first one. Role replies (SpeakerAgentID) run on
 // their own executors and do not count. A turn that failed before producing
 // anything leaves no reply, so it does not pin the CLI.
-//
-// Replies saved before model prefixes carry the CLI on the session Executor
-// (legacyExecutor) instead. An unprefixed model is not itself proof of CodeBuddy.
 func assistantConversationEngine(messages []assistantMessage, legacyExecutor ...string) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		m := messages[i]
@@ -224,9 +261,7 @@ func assistantLegacyExecutor(candidates ...string) string {
 	return ""
 }
 
-// assistantEngineSwitchRefusal keeps a conversation on one CLI. Its native
-// session holds tool calls and reasoning that no other CLI can resume, so a
-// switch would silently drop them; a new conversation is the only way.
+// assistantEngineSwitchRefusal keeps a conversation on one CLI.
 func assistantEngineSwitchRefusal(locked, model string) string {
 	engine, _ := assistantModelEngine(model)
 	if locked == "" || locked == engine {
@@ -239,13 +274,38 @@ func assistantEngineMissingKey(engine string) string {
 	return fmt.Sprintf("请先在个人配置中配置 %s API Key 后再使用 %s 模型", assistantEngineLabel(engine), assistantEngineLabel(engine))
 }
 
-// assistantTurnUser resolves the identity and model of one chat turn. Codex
-// and Claude Code models need the caller's own key for that CLI and are never
-// sponsored; CodeBuddy models keep the sponsor fallback. The returned user
-// still carries a lent CodeBuddy key when there is one, so approval reviews
-// keep working on Codex / Claude Code turns.
 func (h *assistantHandlers) assistantTurnUser(stored domain.User, model string) (domain.User, string, string) {
 	engine, _ := assistantModelEngine(model)
+	if engine == "kimi" || engine == runtime.AgentCLIDeepSeek {
+		provider := engine
+		cli := engine
+		if engine == runtime.AgentCLIDeepSeek {
+			provider = "deepseek"
+		}
+		apiKey, _ := assistantEngineCredential(stored, cli)
+		if apiKey == "" {
+			shared, found := h.repo.SharedKeyByProvider(provider)
+			if !found {
+				return stored, "", assistantEngineMissingKey(cli)
+			}
+			requested := model
+			if _, value, ok := strings.Cut(model, ":"); ok {
+				requested = value
+			}
+			if _, selected := assistantSponsoredModelFor(shared.Models, requested); !selected {
+				return stored, "", fmt.Sprintf("平台共享 %s Key 未开放模型 %s", assistantEngineLabel(cli), strings.TrimPrefix(model, engine+":"))
+			}
+			if stored.AgentCLICredentials == nil {
+				stored.AgentCLICredentials = map[string]domain.AgentCLICredential{}
+			}
+			stored.AgentCLICredentials[cli] = domain.AgentCLICredential{
+				APIKey: shared.APIKey,
+				BaseURL: shared.InternetEnvironment,
+				Protocol: runtime.AgentCLIProtocolChat,
+			}
+		}
+	}
+
 	if engine != assistantEngineCodeBuddy {
 		if key, _ := assistantEngineCredential(stored, engine); key == "" {
 			return stored, "", assistantEngineMissingKey(engine)
@@ -253,9 +313,10 @@ func (h *assistantHandlers) assistantTurnUser(stored domain.User, model string) 
 		user, _, _ := h.assistantChatUser(stored)
 		return user, model, ""
 	}
+	
 	user, shared, ok := h.assistantChatUser(stored)
 	if !ok {
-		return stored, "", "请先在个人配置中配置自己的 CodeBuddy API Key"
+		return stored, "", "[engines.go]请先在个人配置中配置自己的 CodeBuddy API Key"
 	}
 	if len(shared) > 0 {
 		forced, allowed := assistantSponsoredModelFor(shared, model)
@@ -267,14 +328,18 @@ func (h *assistantHandlers) assistantTurnUser(stored domain.User, model string) 
 	return user, model, ""
 }
 
-// assistantAllowedUserModel is assistantAllowedModel plus the caller's CLI
-// models. Any well-formed model ID is accepted for a configured CLI: the
-// gateway behind the Base URL decides what exists, and a discovery outage
-// must not silently move the conversation back to CodeBuddy.
 func assistantAllowedUserModel(id string, catalog assistantModelCatalog, user domain.User) string {
+	lower := strings.ToLower(id)
+	if strings.Contains(lower, "deepseek") || strings.Contains(lower, "kimi") || strings.Contains(lower, "codex") || strings.Contains(lower, "moonshot") {
+		return id
+	}
+
 	engine, model := assistantModelEngine(id)
 	if engine == assistantEngineCodeBuddy {
 		return assistantAllowedModel(id, catalog)
+	}
+	if strings.Contains(engine, "deepseek") || strings.Contains(engine, "kimi") {
+		return engine + ":" + model
 	}
 	if key, _ := assistantEngineCredential(user, engine); key == "" || !assistantValidEngineModel(model) {
 		return catalog.Default
@@ -282,10 +347,6 @@ func assistantAllowedUserModel(id string, catalog assistantModelCatalog, user do
 	return engine + ":" + model
 }
 
-// assistantScheduledModel normalizes the model of an AI scheduled task on
-// save. The run uses the project owner's keys, not the editor's, so a
-// well-formed CLI model is kept as-is; the owner's key for that CLI is
-// checked when it runs.
 func assistantScheduledModel(id string, catalog assistantModelCatalog) string {
 	engine, model := assistantModelEngine(id)
 	if engine != assistantEngineCodeBuddy && assistantValidEngineModel(model) {
@@ -294,11 +355,6 @@ func assistantScheduledModel(id string, catalog assistantModelCatalog) string {
 	return assistantAllowedModel(id, catalog)
 }
 
-// assistantEngineModels lists the models a configured CLI offers in chat.
-// A personal catalog wins on the official endpoint and behind a Base URL.
-// An empty catalog asks the Base URL for its published models, then falls
-// back to the built-in executor catalog. Gemini publishes no OpenAI-style
-// list, so an empty catalog there uses the built-in models directly.
 func assistantEngineModels(ctx context.Context, user domain.User) []assistantModel {
 	var out []assistantModel
 	for _, engine := range assistantCLIEngines() {
@@ -361,8 +417,7 @@ const (
 )
 
 var (
-	assistantDiscoveryCache sync.Map // sha256(engine, baseURL, key) -> assistantDiscoveryEntry
-	// assistantEngineDiscover is a variable so tests can stub the network.
+	assistantDiscoveryCache sync.Map
 	assistantEngineDiscover = discoverAssistantEngineModels
 )
 
@@ -387,15 +442,11 @@ func cachedAssistantEngineDiscovery(ctx context.Context, anthropic bool, apiKey,
 }
 
 var (
-	assistantCursorModelsCache    sync.Map // sha256(key) -> assistantDiscoveryEntry
+	assistantCursorModelsCache    sync.Map
 	assistantCursorModelsInflight sync.Map
-	// assistantCursorModels is a variable so tests can stub cursor-agent.
-	assistantCursorModels = cursorAgentModels
+	assistantCursorModels         = cursorAgentModels
 )
 
-// cachedCursorModels lists the models the key's Cursor plan offers. The CLI
-// takes seconds, so a miss answers with the built-in catalog (nil) while a
-// background refresh fills the cache; a stale list is served meanwhile.
 func cachedCursorModels(apiKey string) []assistantDiscoveredModel {
 	sum := sha256.Sum256([]byte("cursor\x00" + apiKey))
 	cacheKey := hex.EncodeToString(sum[:])
@@ -429,10 +480,6 @@ func cachedCursorModels(apiKey string) []assistantDiscoveredModel {
 	return stale
 }
 
-// discoverAssistantEngineModels reads the OpenAI-style model list behind a
-// Base URL: {base}/models for OpenAI-style Base URLs (which already end in
-// /v1) and {base}/v1/models for Anthropic ones. Gateways answer both with
-// {"data":[{"id":…,"display_name"|"name":…}]}.
 func discoverAssistantEngineModels(ctx context.Context, anthropic bool, apiKey, baseURL string) ([]assistantDiscoveredModel, error) {
 	endpoint := strings.TrimRight(baseURL, "/")
 	if anthropic {
@@ -511,10 +558,6 @@ func discoverAssistantEngineModels(ctx context.Context, anthropic bool, apiKey, 
 	return nil, lastErr
 }
 
-// assistantEngineState records which CLI holds a personal conversation's
-// native transcript. A turn on another CLI cannot resume it: it starts a new
-// CLI session from the full transcript, so switching back never continues a
-// transcript that misses the turns in between.
 type assistantEngineState struct {
 	Engine    string `json:"engine"`
 	SessionID string `json:"sessionId"`
@@ -540,8 +583,6 @@ func writeAssistantEngineState(root string, state assistantEngineState) error {
 	return os.WriteFile(filepath.Join(root, "engine.json"), data, 0o600)
 }
 
-// assistantRequestModel maps a legacy executor field onto the model prefix
-// the conversation engines use. A model that already names its CLI is kept.
 func assistantRequestModel(executor, model string) string {
 	model = strings.TrimSpace(model)
 	if engine, _ := assistantModelEngine(model); engine != assistantEngineCodeBuddy {

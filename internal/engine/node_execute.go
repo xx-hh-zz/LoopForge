@@ -742,6 +742,15 @@ func (e *Engine) executeNode(ctx context.Context, runID string, wf domain.Workfl
 			if cb := sb.credentialSnapshot().CodeBuddy; ex.Kind == "codebuddy" && cb.Sponsored {
 				ex = e.sponsoredExecutor(runID, ex, cb.SponsoredModels, sink)
 			}
+			credentials := sb.credentialSnapshot()
+			if cliCredential := credentials.AgentCLI[ex.Kind]; cliCredential.Shared {
+				var sponsorErr error
+				models := credentials.SharedAgentCLIModels[ex.Kind]
+				ex, sponsorErr = e.sharedAgentCLIExecutor(runID, ex, models, sink)
+				if sponsorErr != nil {
+					return "", sponsorErr
+				}
+			}
 			if execMachine := e.defaultExecutionRunner(current); execMachine != "" {
 				// 执行机器 mode (bind-cli): the responsible user selected a default
 				// execution machine, so the compiled task book, asset bundle, and

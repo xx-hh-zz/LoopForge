@@ -26,22 +26,29 @@ printf '▸ 准备临时源码副本（跳过 .data、.env 和 .git）\n'
 rsync -a \
   --exclude='/.data/' \
   --exclude='/.git/' \
-  --exclude='/.env' \
-  --exclude='/.env.*' \
+  --exclude='/.env*' \
+  --exclude='/compose.override.yaml' \
   "$ROOT/" "$TEMP_SOURCE/"
+
+BUILD_COMPOSE_FILES=(-f "$TEMP_SOURCE/compose.yaml" -f "$TEMP_SOURCE/compose.dev.yaml")
+RUN_COMPOSE_FILES=(-f "$ROOT/compose.yaml" -f "$ROOT/compose.dev.yaml")
+if [[ -f "$TEMP_SOURCE/compose.override.yaml" ]]; then
+  BUILD_COMPOSE_FILES+=(-f "$TEMP_SOURCE/compose.override.yaml")
+fi
+if [[ -f "$ROOT/compose.override.yaml" ]]; then
+  RUN_COMPOSE_FILES+=(-f "$ROOT/compose.override.yaml")
+fi
 
 export LOOPFORGE_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
 printf '▸ 从临时副本构建本机 LoopForge 镜像\n'
 docker_access compose --env-file "$ROOT/.env" \
-  -f "$TEMP_SOURCE/compose.yaml" \
-  -f "$TEMP_SOURCE/compose.dev.yaml" \
+  "${BUILD_COMPOSE_FILES[@]}" \
   --profile platform build platform \
   || fail '镜像构建失败；当前运行中的容器未被替换。'
 
 printf '▸ 使用新镜像更新本机平台容器（保留数据库和 .data）\n'
 docker_access compose --env-file "$ROOT/.env" \
-  -f "$ROOT/compose.yaml" \
-  -f "$ROOT/compose.dev.yaml" \
+  "${RUN_COMPOSE_FILES[@]}" \
   --profile platform up -d --no-build --wait --wait-timeout 180 platform \
   || fail '镜像已构建，但容器更新未完成。查看原因：docker compose --profile platform logs --since 5m platform'
 

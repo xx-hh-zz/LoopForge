@@ -89,18 +89,32 @@ function sopRunRequirements(w){
   const usesRepo=(catalogGeneric(w)||(w?.tags||[]).some(t=>String(t).startsWith('generic-source:')))&&!!project?.defaultRepositoryId;
   const rows=[];
   const providers=new Set();
+  const kimiRoleModels=[];
   for(const node of nodes.filter(n=>n.type==='agent')){
     const role=(state.data?.agents||[]).find(a=>a.id===node.agentId);
     const id=role?.executorId||node.executorId||'codebuddy';
     const kind=(state.data?.executors||[]).find(e=>e.id===id)?.kind||id;
-    if(['codebuddy','codex','claude','claude-code','opencode','cursor','agy','kimi','pi','dsh','zcode'].includes(kind))providers.add(kind==='claude'?'claude-code':kind);
+    if(['codebuddy','codex','claude','claude-code','opencode','cursor','agy','kimi','pi','dsh','zcode'].includes(kind)){
+      const normalized=kind==='claude'?'claude-code':kind;
+      providers.add(normalized);
+      if(normalized==='kimi')kimiRoleModels.push(String(role?.model||'').trim());
+    }
   }
   const agentLabels={opencode:'OpenCode',cursor:'Cursor CLI',agy:'Antigravity',kimi:'Kimi Code',pi:'Pi',dsh:'DeepSeek Harness',zcode:'ZCode'};
   for(const kind of providers){
     const known={codebuddy:['CodeBuddy','codeBuddyApiKey','codeBuddyApiKeyConfigured'],codex:['Codex','codexApiKey','codexApiKeyConfigured'],'claude-code':['Claude Code','claudeCodeApiKey','claudeCodeApiKeyConfigured']}[kind];
     const [label,field,flag]=known||[agentLabels[kind]||kind,'agentCli.'+kind,'agentCliConfigured'];
     if(!known){
-      rows.push({key:'run-key-'+kind,field,fix:'settings',fixLabel:'去个人配置配置',label:label+' API Key',ok:!!user.agentCliCredentials?.[kind]?.apiKeyConfigured,hint:lfT('Agent 节点使用 '+label+'，请在个人配置里配置对应 API Key。','Agent nodes use '+label+'. Configure its API key in Settings.')});
+      const personalReady=!!user.agentCliCredentials?.[kind]?.apiKeyConfigured;
+      if(kind==='kimi'&&!personalReady){
+        const shared=state.data?.sharedKimiKey||{},allowed=Array.isArray(shared.models)?shared.models:[];
+        const sharedReady=shared.configured===true&&allowed.length>0&&kimiRoleModels.length>0&&kimiRoleModels.every(model=>!model||model==='default'||allowed.includes(model));
+        if(sharedReady){
+          rows.push({key:'run-key-kimi',field,fix:'',fixLabel:'',label:'共享 Kimi Key 已配置',ok:true,hint:'当前 SOP 的 Kimi Code 角色模型在平台共享 Key 允许列表中，运行时会使用共享 Key。'});
+          continue;
+        }
+      }
+      rows.push({key:'run-key-'+kind,field,fix:'settings',fixLabel:'去个人配置配置',label:label+' API Key',ok:personalReady,hint:lfT('Agent 节点使用 '+label+'，请在个人配置里配置对应 API Key。','Agent nodes use '+label+'. Configure its API key in Settings.')});
       continue;
     }
     rows.push({key:'run-key-'+kind,field,fix:'settings',fixLabel:'去个人配置配置',label:label+' API Key',ok:!!user[flag],hint:lfT('Agent 节点使用 '+label+'，请在个人配置里配置对应 API Key。','Agent nodes use '+label+'. Configure its API key in Settings.')});

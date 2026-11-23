@@ -342,6 +342,8 @@ export default function App() {
     ),
     [theme, setTheme] = useState(() => readThemePreference(localStorage)),
     [environmentVisibility, setEnvironmentVisibility] = useState(() => readJSON(environmentVisibilityKey, {}));
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [activeOutlineIndex, setActiveOutlineIndex] = useState(null);
   const environmentPreferenceOwner = String(chat.user?.id || "guest");
   const showEnvironmentPicker = environmentVisibility[environmentPreferenceOwner] === true;
   function changeEnvironmentVisibility(visible) {
@@ -361,11 +363,57 @@ export default function App() {
     fileInput = useRef(),
     scroll = useRef(),
     follow = useRef(true),
+    scrollingToBottom = useRef(false),
     draftReady = useRef(null),
     previousArtifacts = useRef({ id: null, ids: new Set(), baselined: false }),
     dialogInput = useRef(),
     composerPreviews = useRef(new Map());
   const draftKey = `agentflow.native-chat.draft.${chat.user?.id || "guest"}.${chat.activeId || "new:" + chat.projectId}`;
+  const syncConversationScroll = useCallback(() => {
+    const el = scroll.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 110;
+    if (atBottom) scrollingToBottom.current = false;
+    if (!scrollingToBottom.current) follow.current = atBottom;
+    setShowScrollToBottom(!atBottom);
+    const threshold = el.getBoundingClientRect().top + 96;
+    const questionCards = el.querySelectorAll('.message.user[data-outline-message="true"]');
+    let currentQuestion = questionCards.length
+      ? Number(questionCards[0].dataset.messageIndex)
+      : null;
+    for (const item of questionCards) {
+      if (item.getBoundingClientRect().top > threshold) break;
+      currentQuestion = Number(item.dataset.messageIndex);
+    }
+    if (currentQuestion !== null) setActiveOutlineIndex(currentQuestion);
+  }, []);
+  const scrollConversationToBottom = useCallback(() => {
+    const el = scroll.current;
+    if (!el) return;
+    scrollingToBottom.current = true;
+    follow.current = true;
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth",
+    });
+  }, []);
+  const jumpToQuestion = useCallback((messageIndex) => {
+    const el = scroll.current;
+    const target = el?.querySelector(`.message.user[data-message-index="${messageIndex}"]`);
+    if (!el || !target) return;
+    scrollingToBottom.current = false;
+    follow.current = false;
+    setActiveOutlineIndex(messageIndex);
+    const top = target.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - 16;
+    el.scrollTo({
+      top: Math.max(0, top),
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth",
+    });
+  }, []);
   useEffect(() => setMention(null), [draftKey]);
   // The open conversation's reply is reported read; the history list dots
   // the replies the server still counts as unread.
@@ -610,15 +658,27 @@ export default function App() {
     sidebarWidth,
   ]);
   useEffect(() => {
-    if (follow.current && scroll.current)
+    if (follow.current && scroll.current) {
       scroll.current.scrollTop = scroll.current.scrollHeight;
+      setShowScrollToBottom(false);
+    }
+    syncConversationScroll();
   }, [
     chat.session?.messages?.length,
     chat.live.answer,
     chat.live.thinking,
     chat.busy,
     runAlertKeys,
+    syncConversationScroll,
   ]);
+  useEffect(() => {
+    const el = scroll.current;
+    const content = el?.querySelector(".message-column");
+    if (!el || !content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(syncConversationScroll);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [chat.activeId, syncConversationScroll]);
   useEffect(() => {
     const keyboard = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -869,6 +929,14 @@ export default function App() {
     }));
   }, [chat.activeId, chat.projectId]);
   const messages = chat.session?.messages || [];
+  const questionMessages = messages.flatMap((message, index) =>
+    message.role === "user" &&
+    !confirmationCaption(message, messages[index - 1]) &&
+    !isProposalTimeout(message, messages[index - 1])
+      ? [{ index, text: visibleText(message).replace(/\s+/g, " ").trim() }]
+      : [],
+  );
+  const questionMessageIndices = new Set(questionMessages.map((message) => message.index));
   const conversationStarted = Boolean(
     chat.activeId && chat.session?.id === chat.activeId &&
     (messages.length || chat.busy || sidebarArtifacts.length || conversationRuns.length),
@@ -1461,11 +1529,10 @@ export default function App() {
           <div
             className="message-scroll"
             ref={scroll}
-            onScroll={(e) => {
-              const el = e.currentTarget;
-              follow.current =
-                el.scrollHeight - el.scrollTop - el.clientHeight < 110;
-            }}
+            onScroll={syncConversationScroll}
+            onWheel={() => { scrollingToBottom.current = false; }}
+            onTouchStart={() => { scrollingToBottom.current = false; }}
+            onPointerDown={() => { scrollingToBottom.current = false; }}
           >
             <div className="message-column">
               {!chat.session && !chat.error ? (
@@ -1486,6 +1553,7 @@ export default function App() {
                     key={index}
                     className={`message ${message.role}`}
                     data-message-index={index}
+                    data-outline-message={questionMessageIndices.has(index) ? "true" : undefined}
                   >
                     {message.role === "assistant" ? (
                       <AssistantTurn
@@ -1667,10 +1735,52 @@ export default function App() {
                 }}
               />
             </div>
+            {showScrollToBottom ? (
+              <div className="scroll-to-bottom-wrap">
+                <button
+                  type="button"
+                  className="scroll-to-bottom"
+                  aria-label="回到底部"
+                  onClick={scrollConversationToBottom}
+                >
+                  <HarnessIcon
+                    name="arrow-up"
+                    size={16}
+                    className="scroll-to-bottom-icon"
+                    interactive={false}
+                  />
+                </button>
+              </div>
+            ) : null}
           </div>
         ) : (
           <HomeWelcome />
         )}
+        {chat.activeId && questionMessages.length > 1 ? (
+          <nav className="conversation-outline" aria-label="本会话问题目录">
+            <div className="conversation-outline-list">
+              {questionMessages.map((question) => {
+                const label = question.text || "图片或附件";
+                const shortLabel = label.length > 180
+                  ? `${label.slice(0, 180)}…`
+                  : label;
+                return (
+                  <button
+                    key={question.index}
+                    type="button"
+                    className={`conversation-outline-item ${activeOutlineIndex === question.index ? "is-active" : ""}`}
+                    aria-label={`定位到问题：${shortLabel}`}
+                    title={shortLabel}
+                    onClick={() => jumpToQuestion(question.index)}
+                  >
+                    <span className="conversation-outline-tick" aria-hidden="true" />
+                    <span className="conversation-outline-label">{shortLabel}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </nav>
+        ) : null}
         <div className="composer-region">
           <div className="composer-column">
             {chat.error ? (

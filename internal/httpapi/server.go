@@ -756,6 +756,12 @@ func (s *Server) bootstrap(c *gin.Context) {
 	if len(sharedModels) > 0 {
 		sponsoredModel = sharedModels[0]
 	}
+	sharedKimiKey := gin.H{"configured": false, "models": []string{}}
+	if currentUserID > 0 {
+		if shared, ok := s.repo.SharedKeyByProvider("kimi"); ok {
+			sharedKimiKey = gin.H{"configured": true, "models": shared.Models}
+		}
+	}
 	c.JSON(200, map[string]any{
 		"businessDomains": businessDomains, "projects": domain.PublicProjects(projects), "repositories": domain.PublicRepositories(repositories),
 		"agents": catalogAgents(agents), "rules": rules, "skills": skills, "mcpServers": mcpServers,
@@ -769,6 +775,9 @@ func (s *Server) bootstrap(c *gin.Context) {
 		// (sponsoredModel is the default).
 		"sponsoredModel":  sponsoredModel,
 		"sponsoredModels": sharedModels,
+		// Expose only whether the shared Kimi Code key is usable and its
+		// model allow-list; never include the key or Base URL in bootstrap.
+		"sharedKimiKey": sharedKimiKey,
 	})
 }
 

@@ -92,9 +92,6 @@ func validateAgentConfigTarget(workspace, rel string) (os.FileInfo, error) {
 	if info.Mode()&os.ModeSymlink == 0 {
 		return info, nil
 	}
-	if projectAgentDirNames[filepath.Base(rel)] {
-		return nil, fmt.Errorf("refusing symlinked Agent CLI directory: %s", target)
-	}
 	resolved, err := filepath.EvalSymlinks(target)
 	if err != nil {
 		return nil, err
@@ -108,10 +105,51 @@ func validateAgentConfigTarget(workspace, rel string) (os.FileInfo, error) {
 		return nil, err
 	}
 	inside, err := filepath.Rel(root, resolved)
-	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(os.PathSeparator)) || !projectAgentFileNames[filepath.Base(resolved)] {
+	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(os.PathSeparator)) {
+		return nil, fmt.Errorf("refusing Agent CLI configuration symlink outside the workspace: %s", target)
+	}
+	resolvedInfo, err := os.Stat(resolved)
+	if err != nil {
+		return nil, err
+	}
+	base := filepath.Base(resolved)
+	if projectAgentDirNames[filepath.Base(rel)] {
+		if !resolvedInfo.IsDir() {
+			return nil, fmt.Errorf("refusing Agent CLI directory symlink to a non-directory: %s", target)
+		}
+		return resolvedInfo, nil
+	}
+	if !projectAgentFileNames[base] || !resolvedInfo.Mode().IsRegular() {
 		return nil, fmt.Errorf("refusing Agent CLI configuration symlink outside the known project configuration set: %s", target)
 	}
-	return os.Stat(target)
+	return resolvedInfo, nil
+}
+
+// agentConfigMaskPath resolves an allowed in-workspace directory symlink to
+// its real workspace-relative target. Mounting the canonical target avoids
+// asking Docker to mount over a destination that is itself a symlink.
+func agentConfigMaskPath(workspace, rel string) (string, os.FileInfo, error) {
+	info, err := validateAgentConfigTarget(workspace, rel)
+	if err != nil {
+		return "", nil, err
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(workspace, rel))
+	if err != nil {
+		return "", nil, err
+	}
+	root, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", nil, err
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", nil, err
+	}
+	canonical, err := filepath.Rel(root, resolved)
+	if err != nil {
+		return "", nil, err
+	}
+	return canonical, info, nil
 }
 
 func appendEnvironment(base []string, overlays ...map[string]string) []string {
@@ -375,16 +413,21 @@ func seatbeltProfileCommand(workspace string, requirements SandboxRequirements, 
 	if err != nil {
 		return "", err
 	}
+	seen := map[string]bool{}
 	for _, rel := range maskedPaths {
-		path := filepath.Join(root, rel)
-		if _, err := os.Lstat(path); err == nil {
-			if _, err := validateAgentConfigTarget(root, rel); err != nil {
-				return "", err
-			}
-		} else if !os.IsNotExist(err) {
+		canonical, _, err := agentConfigMaskPath(root, rel)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
 			return "", err
 		}
-		if projectAgentDirNames[filepath.Base(rel)] {
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		path := filepath.Join(root, canonical)
+		if projectAgentDirNames[filepath.Base(canonical)] {
 			fmt.Fprintf(&b, "(deny file-read* (subpath %s))\n", strconv.Quote(path))
 		} else {
 			fmt.Fprintf(&b, "(deny file-read* (literal %s))\n", strconv.Quote(path))
@@ -512,15 +555,20 @@ func bwrapAgentConfigMasks(workspace string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	seen := map[string]bool{}
 	for _, rel := range maskedPaths {
-		target := filepath.Join(workspace, rel)
-		info, statErr := validateAgentConfigTarget(workspace, rel)
+		canonical, info, statErr := agentConfigMaskPath(workspace, rel)
 		if os.IsNotExist(statErr) {
 			continue
 		}
 		if statErr != nil {
 			return nil, statErr
 		}
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		target := filepath.Join(workspace, canonical)
 		source := emptyFile
 		if info.IsDir() {
 			source = emptyDir
@@ -577,19 +625,24 @@ func dockerAgentConfigMasks(workspace string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	seen := map[string]bool{}
 	for _, rel := range maskedPaths {
-		info, statErr := validateAgentConfigTarget(workspace, rel)
+		canonical, info, statErr := agentConfigMaskPath(workspace, rel)
 		if os.IsNotExist(statErr) {
 			continue
 		}
 		if statErr != nil {
 			return nil, statErr
 		}
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
 		source := emptyFile
 		if info.IsDir() {
 			source = emptyDir
 		}
-		containerTarget := filepath.ToSlash(filepath.Join("/workspace", rel))
+		containerTarget := filepath.ToSlash(filepath.Join("/workspace", canonical))
 		args = append(args, "--mount", "type=bind,src="+source+",dst="+containerTarget+",readonly")
 	}
 	return args, nil

@@ -32,7 +32,18 @@ const (
 
 // assistantCLIEngines are the CLIs other than CodeBuddy, in switch order.
 func assistantCLIEngines() []string {
-	return append([]string{assistantEngineCodex, assistantEngineClaude, "kimi"}, runtime.AgentCLIKinds...)
+	// return append([]string{assistantEngineCodex, assistantEngineClaude, "kimi"}, runtime.AgentCLIKinds...)
+	engines := append([]string{assistantEngineCodex, assistantEngineClaude, "kimi"}, runtime.AgentCLIKinds...)
+	seen := make(map[string]bool, len(engines))
+	unique := engines[:0]
+	for _, engine := range engines {
+		if seen[engine] {
+			continue
+		}
+		seen[engine] = true
+		unique = append(unique, engine)
+	}
+	return unique
 }
 
 func assistantModelEngine(id string) (engine, model string) {

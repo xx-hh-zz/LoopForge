@@ -111,11 +111,21 @@ func submitAssistantReplySchema(exec assistantExecMode) map[string]any {
 	names := assistantWriteToolNameList()
 	toolSchema := map[string]any{"type": "string", "description": "必填：本草稿要执行的写入工具名称，如 issues_save、issues_dispatch；不要省略，不带 mcp__ 前缀"}
 	if len(names) > 0 {
+		// PublicOperations is currently unique by name, but keep the wire
+		// schema valid if a future catalog source contains duplicate entries.
+		// JSON Schema requires enum values to be unique.
+		seen := make(map[string]struct{}, len(names)+1)
 		enum := make([]any, 0, len(names)+1)
 		for _, name := range names {
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
 			enum = append(enum, name)
 		}
-		enum = append(enum, "assistant_tasks_save")
+		if _, ok := seen["assistant_tasks_save"]; !ok {
+			enum = append(enum, "assistant_tasks_save")
+		}
 		toolSchema["enum"] = enum
 	}
 	draft := map[string]any{

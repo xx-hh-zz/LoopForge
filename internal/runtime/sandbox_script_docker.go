@@ -204,15 +204,20 @@ func (s *dockerSandbox) currentAgentMasks() ([]string, error) {
 		return nil, err
 	}
 	var hide []string
+	seen := map[string]bool{}
 	for _, rel := range paths {
-		_, err := validateAgentConfigTarget(s.workspace, rel)
+		canonical, _, err := agentConfigMaskPath(s.workspace, rel)
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		hide = append(hide, filepath.ToSlash(filepath.Join("/workspace", rel)))
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		hide = append(hide, filepath.ToSlash(filepath.Join("/workspace", canonical)))
 	}
 	return hide, nil
 }

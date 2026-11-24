@@ -18,8 +18,6 @@ import (
 	"time"
 
 	"agentflow/internal/domain"
-	"agentflow/internal/gitwork"
-	"agentflow/internal/repo"
 
 	"github.com/gin-gonic/gin"
 )
@@ -415,14 +413,25 @@ func (h *githubHandlers) poll(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "当前仅支持非过期 OAuth 令牌，请管理员关闭 OAuth App 的令牌过期选项后重试"})
 		return
 	}
-	githubLog(c, "device.poll.credential_save.start", "")
-	saved, err := h.repo.UpdateUserCredentials(userID, repo.UserCredentialUpdate{GitToken: result.AccessToken})
+	existingID := ""
+	credentials, err := h.repo.GitHTTPCredentials(userID)
 	if err != nil {
 		githubLog(c, "device.poll.credential_save.failed", "error=%q", githubLogText(err.Error()))
 		respond(c, err)
 		return
 	}
-	githubLog(c, "device.poll.credential_save.succeeded", "")
+	for _, credential := range credentials {
+		if credential.Host == "github.com" {
+			existingID = credential.ID
+			break
+		}
+	}
+	err = h.repo.SaveGitHTTPCredential(userID, existingID, domain.GitHTTPCredentialSecret{GitHTTPCredential: domain.GitHTTPCredential{Name: "GitHub", Host: "github.com", Platform: domain.GitPlatformGitHub, Username: domain.GitTokenHTTPUser}, Token: result.AccessToken})
+	if err != nil {
+		respond(c, err)
+		return
+	}
+	saved, _ := h.repo.User(userID)
 	c.JSON(http.StatusOK, gin.H{"status": "connected", "login": identity.Login, "user": domain.PublicUser(saved)})
 }
 
@@ -433,9 +442,8 @@ func (h *githubHandlers) repositories(c *gin.Context) {
 		githubLog(c, "repositories.request.rejected", "reason=authentication_or_origin")
 		return
 	}
-	user, ok := h.repo.User(userID)
-	if !ok || user.GitToken == "" {
-		githubLog(c, "repositories.request.rejected", "reason=github_credential_missing")
+	credential, ok := h.repo.GitHTTPCredentialForHost(c.Request.Context(), userID, "github.com")
+	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请先连接 GitHub"})
 		return
 	}
@@ -451,8 +459,7 @@ func (h *githubHandlers) repositories(c *gin.Context) {
 		DefaultBranch string `json:"default_branch"`
 		Private       bool   `json:"private"`
 	}
-	_, token := gitwork.SplitToken(user.GitToken)
-	githubLog(c, "repositories.fetch.start", "page=%d", page)
+	token := credential.Token
 	err = h.request(c, http.MethodGet, "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member&page="+strconv.Itoa(page), token, nil, &repositories)
 	if err != nil {
 		githubLog(c, "repositories.fetch.failed", "page=%d error=%q", page, githubLogText(err.Error()))

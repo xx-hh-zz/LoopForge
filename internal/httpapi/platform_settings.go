@@ -20,8 +20,8 @@ import (
 
 // platformAdminWrite admits a platform administrator's change: an API token,
 // or a same-origin browser request (the session cookie alone is not enough).
-func (h *usersHandlers) platformAdminWrite(c *gin.Context) bool {
-	if !h.isPlatformAdmin(c.Request) {
+func (d deps) platformAdminWrite(c *gin.Context) bool {
+	if !d.isPlatformAdmin(c.Request) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "只有平台管理员可以执行该操作"})
 		return false
 	}
@@ -149,7 +149,82 @@ func (h *usersHandlers) resetPlatformAccountPassword(c *gin.Context) {
 	c.JSON(http.StatusOK, account)
 }
 
+func (h *usersHandlers) deletePlatformAccount(c *gin.Context) {
+	if !h.platformAdminWrite(c) {
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid user id is required"})
+		return
+	}
+	actor, ok := h.requestUser(c.Request, true)
+	if !ok || actor.ID == id {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "不能删除当前登录的管理员账号"})
+		return
+	}
+	account := h.platformAccount(id)
+	if account.LoginName == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "账号不存在"})
+		return
+	}
+	if account.Admin {
+		accounts, listErr := h.repo.ListPlatformAccounts()
+		if listErr != nil {
+			respond(c, listErr)
+			return
+		}
+		otherAdmin := false
+		for _, candidate := range accounts {
+			if candidate.Admin && candidate.UserID != id {
+				otherAdmin = true
+				break
+			}
+		}
+		if !otherAdmin {
+			c.JSON(http.StatusConflict, gin.H{"error": "不能删除最后一个平台管理员"})
+			return
+		}
+	}
+	if err := h.repo.DeletePlatformAccount(id); err != nil {
+		if errors.Is(err, repo.ErrAccountHasActiveWork) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		respond(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": true, "userId": id})
+}
+
 var sharedModelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
+
+// sharedCodeBuddyModels normalizes the allow list of the shared CodeBuddy
+// key: blanks and duplicates are dropped in submission order, every ID must
+// match sharedModelPattern, and the list must hold 1..MaxSharedCodeBuddyModels
+// entries. The error text is shown to the administrator as is.
+func sharedCodeBuddyModels(raw []string) ([]string, error) {
+	var models []string
+	seen := map[string]bool{}
+	for _, value := range raw {
+		id := strings.TrimSpace(value)
+		if id == "" || seen[id] {
+			continue
+		}
+		if !sharedModelPattern.MatchString(id) {
+			return nil, errors.New("模型 ID 格式不正确：" + id)
+		}
+		seen[id] = true
+		models = append(models, id)
+	}
+	if len(models) == 0 {
+		return nil, errors.New("请至少选择一个允许使用的模型")
+	}
+	if len(models) > repo.MaxSharedCodeBuddyModels {
+		return nil, fmt.Errorf("最多选择 %d 个模型", repo.MaxSharedCodeBuddyModels)
+	}
+	return models, nil
+}
 
 type platformCodeBuddyKeyResponse struct {
 	repo.PlatformCodeBuddyKeyStatus
@@ -224,33 +299,16 @@ func (h *usersHandlers) savePlatformCodeBuddyKey(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key 格式不正确"})
 		return
 	}
-	var models []string
-	seen := map[string]bool{}
-	for _, raw := range input.Models {
-		id := strings.TrimSpace(raw)
-		if id == "" || seen[id] {
-			continue
-		}
-		if !sharedModelPattern.MatchString(id) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "模型 ID 格式不正确：" + id})
-			return
-		}
-		seen[id] = true
-		models = append(models, id)
-	}
-	if len(models) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "请至少选择一个允许使用的模型"})
-		return
-	}
-	if len(models) > repo.MaxSharedCodeBuddyModels {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("最多选择 %d 个模型", repo.MaxSharedCodeBuddyModels)})
+	models, err := sharedCodeBuddyModels(input.Models)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	var actorID int64
 	if current, ok := h.requestUser(c.Request, true); ok {
 		actorID = current.ID
 	}
-	err := h.repo.SetPlatformCodeBuddyKey(repo.PlatformCodeBuddyKeyUpdate{APIKey: key, InternetEnvironment: environment, Models: models}, actorID)
+	err = h.repo.SetPlatformCodeBuddyKey(repo.PlatformCodeBuddyKeyUpdate{APIKey: key, InternetEnvironment: environment, Models: models}, actorID)
 	if errors.Is(err, repo.ErrSharedCodeBuddyKeyRequired) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请填写 CodeBuddy API Key"})
 		return

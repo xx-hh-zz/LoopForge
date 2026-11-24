@@ -46,11 +46,14 @@ func (k SharedCodeBuddyKey) Model(requested string) (string, bool) {
 		return "", false
 	}
 	requested = strings.TrimSpace(requested)
+	if _, id, ok := strings.Cut(requested, ":"); ok {
+		requested = id
+	}
 	if requested == "" {
 		return k.Models[0], true
 	}
 	for _, id := range k.Models {
-		if id == requested {
+		if id == requested || strings.TrimPrefix(id, "kimi-") == requested || strings.TrimPrefix(id, "deepseek-") == requested {
 			return id, true
 		}
 	}

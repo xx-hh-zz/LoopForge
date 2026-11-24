@@ -14,6 +14,7 @@ import (
 	"agentflow/internal/observability"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ---------- Run header mapping ----------
@@ -140,20 +141,14 @@ func (r *RunsRepo) runSummariesFor(filter domain.AnalyticsFilter, issueID string
 	}
 	q := r.DB
 	if filter.ProjectIDs != nil {
-		expr := "json_extract(execution_context, '$.projectId')"
-		if r.isMySQL() {
-			expr = "JSON_UNQUOTE(JSON_EXTRACT(execution_context, '$.projectId'))"
-		}
+		expr := r.sqlExecutionContextJSONText("projectId")
 		q = q.Where(expr+" IN ? OR "+expr+" IS NULL OR "+expr+" = ''", filter.ProjectIDs)
 	}
 	if filter.WorkflowID != "" {
 		q = q.Where("workflow_id = ?", filter.WorkflowID)
 	}
 	if projectID := strings.TrimSpace(filter.ProjectID); projectID != "" {
-		expr := "json_extract(execution_context, '$.projectId')"
-		if r.isMySQL() {
-			expr = "JSON_UNQUOTE(JSON_EXTRACT(execution_context, '$.projectId'))"
-		}
+		expr := r.sqlExecutionContextJSONText("projectId")
 		// Keep legacy rows with an empty project stamp; FilterRunsByProject
 		// still resolves those through the linked issue.
 		q = q.Where(expr+" = ? OR "+expr+" IS NULL OR "+expr+" = ''", projectID)
@@ -165,10 +160,7 @@ func (r *RunsRepo) runSummariesFor(filter domain.AnalyticsFilter, issueID string
 		q = q.Where("created_at <= ? OR created_at IS NULL", filter.To)
 	}
 	if issueID != "" {
-		expr := "json_extract(execution_context, '$.issueId')"
-		if r.isMySQL() {
-			expr = "JSON_UNQUOTE(JSON_EXTRACT(execution_context, '$.issueId'))"
-		}
+		expr := r.sqlExecutionContextJSONText("issueId")
 		q = q.Where(expr+" = ?", issueID)
 	}
 	var rows []runRow
@@ -305,6 +297,17 @@ func (r *RunsRepo) Run(id string) (domain.Run, bool) {
 		return domain.Run{}, false
 	}
 	return run, true
+}
+
+// RunHeader reads identity and execution scope without loading the snapshot,
+// nodes, events or artifacts. A missing run is returned as an empty header.
+func (r *RunsRepo) RunHeader(id string) (domain.Run, error) {
+	var row runRow
+	err := r.DB.Select("id", "kind", "workflow_id", "execution_context").Where("id = ?", id).Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.Run{}, nil
+	}
+	return runFromRow(row), err
 }
 
 // RunState returns the durable aggregate needed by the execution engine.
@@ -446,10 +449,7 @@ func (r *RunsRepo) SupersededIssueRunIDs(issueID, keepRunID string) []string {
 	if issueID == "" {
 		return nil
 	}
-	expr := "json_extract(execution_context, '$.issueId')"
-	if r.isMySQL() {
-		expr = "JSON_UNQUOTE(JSON_EXTRACT(execution_context, '$.issueId'))"
-	}
+	expr := r.sqlExecutionContextJSONText("issueId")
 	var ids []string
 	q := r.DB.Model(&runRow{}).
 		Where(expr+" = ?", issueID).
@@ -756,10 +756,7 @@ func (r *RunsRepo) runTimingEvents(ids []string) (map[string][]domain.RunEvent, 
 // nodes, events or artifact content. Missing runs are absent from the map.
 func (r *RunsRepo) RunProjectIDs(ids []string) (map[string]string, error) {
 	out := make(map[string]string, len(ids))
-	project := "json_extract(execution_context, '$.projectId')"
-	if r.isMySQL() {
-		project = "JSON_UNQUOTE(JSON_EXTRACT(execution_context, '$.projectId'))"
-	}
+	project := r.sqlExecutionContextJSONText("projectId")
 	for start := 0; start < len(ids); start += 500 {
 		var rows []struct {
 			ID        string
@@ -1089,20 +1086,32 @@ func (r *RunsRepo) writeRunOnce(run domain.Run, lockKey string, expectedRevision
 // re-check keep a queued run from being promoted mid-delete.
 func (r *RunsRepo) DeleteRun(id string) error {
 	return r.DB.Transaction(func(tx *gorm.DB) error {
-		row, err := r.takeRunForUpdate(tx, id)
-		if err != nil {
-			return err
-		}
-		if row.Status == "running" || row.Status == "waiting" || row.Status == "queued" {
-			return fmt.Errorf("run %s is %s: cancel it before deleting", id, row.Status)
-		}
-		for _, table := range []string{"run_nodes", "run_events", "run_telemetry", "run_logs", "run_artifacts", "run_evals", "run_workspace_checkpoint_chunks", "run_workspace_checkpoints"} {
-			if err := tx.Table(table).Where("run_id = ?", id).Delete(nil).Error; err != nil {
-				return fmt.Errorf("runs delete %s: %w", id, err)
-			}
-		}
-		return tx.Where("id = ?", id).Delete(&runRow{}).Error
+		return deleteRunInTransaction(tx, id)
 	})
+}
+
+// deleteRunInTransaction removes a settled run and all child records using an
+// existing transaction. Account deletion uses the same path so cleanup stays
+// atomic with the identity removal.
+func deleteRunInTransaction(tx *gorm.DB, id string) error {
+	query := tx.Where("id = ?", id)
+	if tx.Dialector.Name() == "mysql" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var row runRow
+	err := query.Take(&row).Error
+	if err != nil {
+		return err
+	}
+	if row.Status == "running" || row.Status == "waiting" || row.Status == "queued" {
+		return fmt.Errorf("run %s is %s: cancel it before deleting", id, row.Status)
+	}
+	for _, table := range []string{"run_nodes", "run_events", "run_telemetry", "run_logs", "run_artifacts", "run_evals", "run_workspace_checkpoint_chunks", "run_workspace_checkpoints"} {
+		if err := tx.Table(table).Where("run_id = ?", id).Delete(nil).Error; err != nil {
+			return fmt.Errorf("runs delete %s: %w", id, err)
+		}
+	}
+	return tx.Where("id = ?", id).Delete(&runRow{}).Error
 }
 
 // ---------- Run leases ----------
@@ -1296,39 +1305,7 @@ func (r *RunsRepo) WorkflowMetricsFor(projectID string) []domain.WorkflowMetrics
 			m.LastRunAt = &createdAt
 			m.LastRunStatus = run.Status
 		}
-		index := map[string]int{}
-		for i := range m.NodeMetrics {
-			index[m.NodeMetrics[i].NodeID] = i + 1
-		}
-		for nodeID, node := range run.Nodes {
-			pos := index[nodeID] - 1
-			if pos < 0 {
-				name := nodeID
-				for _, definition := range workflowDefs[run.WorkflowID].Nodes {
-					if definition.ID == nodeID {
-						name = definition.Name
-					}
-				}
-				m.NodeMetrics = append(m.NodeMetrics, domain.WorkflowNodeMetric{NodeID: nodeID, Name: name})
-				pos = len(m.NodeMetrics) - 1
-			}
-			nm := &m.NodeMetrics[pos]
-			if node.Attempt > 0 {
-				nm.Executions += node.Attempt
-			}
-			switch node.Status {
-			case "succeeded":
-				nm.Succeeded++
-			case "failed":
-				nm.Failed++
-			case "waiting_approval":
-				nm.Waiting++
-			}
-			nm.Reworks += node.ReworkCount
-			if !node.StartedAt.IsZero() && !node.FinishedAt.IsZero() {
-				nodeDurations[run.WorkflowID][nodeID] += node.FinishedAt.Sub(node.StartedAt).Milliseconds()
-			}
-		}
+		accumulateNodeMetrics(m, run, workflowDefs[run.WorkflowID], nodeDurations[run.WorkflowID])
 	}
 	out := make([]domain.WorkflowMetrics, 0, len(metrics))
 	for id, m := range metrics {
@@ -1366,6 +1343,45 @@ func (r *RunsRepo) WorkflowMetricsFor(projectID string) []domain.WorkflowMetrics
 		return left.After(right)
 	})
 	return out
+}
+
+// accumulateNodeMetrics folds one run's node results into m.NodeMetrics,
+// appending a metric (named from def, falling back to the node ID) for nodes
+// not seen before, and adds finished node durations to durations by node ID.
+func accumulateNodeMetrics(m *domain.WorkflowMetrics, run domain.Run, def domain.WorkflowDefinition, durations map[string]int64) {
+	index := map[string]int{}
+	for i := range m.NodeMetrics {
+		index[m.NodeMetrics[i].NodeID] = i + 1
+	}
+	for nodeID, node := range run.Nodes {
+		pos := index[nodeID] - 1
+		if pos < 0 {
+			name := nodeID
+			for _, definition := range def.Nodes {
+				if definition.ID == nodeID {
+					name = definition.Name
+				}
+			}
+			m.NodeMetrics = append(m.NodeMetrics, domain.WorkflowNodeMetric{NodeID: nodeID, Name: name})
+			pos = len(m.NodeMetrics) - 1
+		}
+		nm := &m.NodeMetrics[pos]
+		if node.Attempt > 0 {
+			nm.Executions += node.Attempt
+		}
+		switch node.Status {
+		case "succeeded":
+			nm.Succeeded++
+		case "failed":
+			nm.Failed++
+		case "waiting_approval":
+			nm.Waiting++
+		}
+		nm.Reworks += node.ReworkCount
+		if !node.StartedAt.IsZero() && !node.FinishedAt.IsZero() {
+			durations[nodeID] += node.FinishedAt.Sub(node.StartedAt).Milliseconds()
+		}
+	}
 }
 
 // parallel waits for a set of concurrent loads and returns the first error.

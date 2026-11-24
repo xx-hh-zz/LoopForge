@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"log"
 	"net/http"
 	"net/url"
 	"sync"
@@ -100,6 +101,7 @@ func (h *authHandlers) authPassword(c *gin.Context) {
 	}
 	u, found := h.repo.UserByLoginName(input.Login)
 	valid := h.repo.CheckLocalPassword(u.ID, input.Password)
+	log.Printf("password auth login=%q found=%v user_id=%d valid=%v", input.Login, found, u.ID, valid)
 	if !found || !valid {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
 		return

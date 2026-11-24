@@ -2,11 +2,13 @@ package runtime
 
 import (
 	"agentflow/internal/domain"
+	"agentflow/internal/managedcli"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,6 +24,16 @@ func (r *ExecutorRunner) Run(ctx context.Context, sb Sandbox, invocationID strin
 		return "", err
 	}
 	driver := sandboxDriver(sb)
+	binary, cliLease, err := pinNativeExecutorCLI(ctx, driver, options.RunID, ex)
+	if err != nil {
+		return "", err
+	}
+	if cliLease != nil {
+		defer cliLease.Close()
+	}
+	if binary != "" {
+		ex.Binary = binary
+	}
 	if options.BrowserMCP == nil && BrowserWantedForExecutor(ex.Kind) {
 		options.BrowserMCP = EnsureSandboxBrowser(ctx, sb, sb.Workspace(), options.RunID, sink)
 	}
@@ -60,6 +72,10 @@ func (r *ExecutorRunner) Run(ctx context.Context, sb Sandbox, invocationID strin
 	command, err := provider.Prepare(providerInvocation{Executor: ex, Compiled: compiled, Prompt: prompt, PromptFile: promptRel, Driver: driver, Options: options})
 	if err != nil {
 		return "", err
+	}
+	command = withBwrapManagedCLI(command, driver)
+	if cliLease != nil {
+		command = WithCommandEnvironment(command, managedcli.AutoUpdateEnvironment(command.Provider))
 	}
 	if strings.EqualFold(command.Provider, "codex") {
 		overlay := map[string]string{}
@@ -209,7 +225,7 @@ func (r *ExecutorRunner) PrepareRemote(workspace string, inv RemoteInvocation) (
 		command.HookOutput = compiled.HookOutput
 	}
 	command = WithCommandEnvironment(command, hookExecutionEnvironment(inv.Options.Repositories))
-	return &PreparedRemote{Command: command}, nil
+	return &PreparedRemote{Command: withBwrapManagedCLI(command, driver)}, nil
 }
 
 func mockShouldSubmitGate(workspace string, agent domain.AgentDefinition, options InvocationOptions) bool {
@@ -314,15 +330,12 @@ func executorReportedError(adapterResult, raw string) error {
 }
 
 func hasArg(values []string, wanted string) bool {
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, wanted)
 }
 
-func dropArgWithValue(values []string, flag string) []string {
+// dropArgWithValue removes every occurrence of the given flags together with
+// their value, accepting both the "--flag value" and "--flag=value" forms.
+func dropArgWithValue(values []string, flags ...string) []string {
 	out := make([]string, 0, len(values))
 	skip := false
 	for _, value := range values {
@@ -330,11 +343,11 @@ func dropArgWithValue(values []string, flag string) []string {
 			skip = false
 			continue
 		}
-		if value == flag {
+		if slices.Contains(flags, value) {
 			skip = true
 			continue
 		}
-		if strings.HasPrefix(value, flag+"=") {
+		if slices.ContainsFunc(flags, func(flag string) bool { return strings.HasPrefix(value, flag+"=") }) {
 			continue
 		}
 		out = append(out, value)

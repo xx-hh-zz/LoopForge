@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"agentflow/internal/domain"
@@ -110,10 +111,5 @@ func (e *Engine) sharedAgentCLIExecutor(runID string, ex domain.ExecutorDefiniti
 }
 
 func hasRunEvent(run domain.Run, typ string) bool {
-	for _, event := range run.Events {
-		if event.Type == typ {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(run.Events, func(event domain.RunEvent) bool { return event.Type == typ })
 }

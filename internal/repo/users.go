@@ -4,12 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"agentflow/internal/domain"
+
+	"gorm.io/gorm"
 )
 
 // ---------- Users ----------
@@ -24,10 +28,13 @@ type userWithConfig struct {
 	PlatformRole                 string     `gorm:"column:platform_role"`
 	GitToken                     *string    `gorm:"column:git_token"`
 	GitSSHKeyConfigured          bool       `gorm:"column:git_ssh_key_configured"`
+	GitHTTPCredentialsConfigured bool       `gorm:"column:git_http_credentials_configured"`
+	GitHubCredentialConfigured   bool       `gorm:"column:github_credential_configured"`
 	GongfengRefreshToken         *string    `gorm:"column:gongfeng_refresh_token"`
 	GongfengTokenExpiresAt       *time.Time `gorm:"column:gongfeng_token_expires_at"`
 	CodeBuddyAPIKey              *string    `gorm:"column:codebuddy_api_key"`
 	CodeBuddyInternetEnvironment string     `gorm:"column:codebuddy_internet_environment"`
+	CodeBuddyModels              *string    `gorm:"column:codebuddy_models"`
 	CodexAPIKey                  *string    `gorm:"column:codex_api_key"`
 	CodexBaseURL                 *string    `gorm:"column:codex_base_url"`
 	CodexModels                  *string    `gorm:"column:codex_models"`
@@ -44,7 +51,9 @@ type userWithConfig struct {
 const userSelectColumns = `u.id, u.staff_id, u.login_name, u.chinese_name, u.dept_id, u.dept_name,
 	COALESCE(u.platform_role, '') AS platform_role,
 	c.git_token, EXISTS (SELECT 1 FROM user_git_ssh_keys k WHERE k.user_id = u.id) AS git_ssh_key_configured,
-	c.gongfeng_refresh_token, c.gongfeng_token_expires_at, c.codebuddy_api_key, COALESCE(c.codebuddy_internet_environment, '') AS codebuddy_internet_environment,
+	EXISTS (SELECT 1 FROM user_git_http_credentials h WHERE h.user_id = u.id) AS git_http_credentials_configured,
+	EXISTS (SELECT 1 FROM user_git_http_credentials h WHERE h.user_id = u.id AND h.host = 'github.com') AS github_credential_configured,
+	c.gongfeng_refresh_token, c.gongfeng_token_expires_at, c.codebuddy_api_key, COALESCE(c.codebuddy_internet_environment, '') AS codebuddy_internet_environment, c.codebuddy_models,
 	c.codex_api_key, c.codex_base_url, c.codex_models, c.claude_code_api_key, c.claude_code_base_url, c.claude_code_models,
 	c.agent_cli_credentials,
 	c.kimi_api_key,
@@ -56,7 +65,10 @@ func (r userWithConfig) toDomain() domain.User {
 		ID: r.ID, StaffID: r.StaffID, LoginName: r.LoginName, ChineseName: r.ChineseName,
 		DeptID: r.DeptID, DeptName: r.DeptName, PlatformRole: r.PlatformRole,
 		CodeBuddyInternetEnvironment: r.CodeBuddyInternetEnvironment,
+		CodeBuddyModels:              decodeCLIModels(r.CodeBuddyModels),
 		GitSSHKeyConfigured:          r.GitSSHKeyConfigured,
+		GitHTTPCredentialsConfigured: r.GitHTTPCredentialsConfigured,
+		GitHubCredentialConfigured:   r.GitHubCredentialConfigured,
 	}
 	if r.GitToken != nil {
 		u.GitToken = *r.GitToken
@@ -99,13 +111,20 @@ func (r userWithConfig) toDomain() domain.User {
 	if r.Updated != nil {
 		u.UpdatedAt = *r.Updated
 	}
+	if _, managed := managedGitHTTPCredential(u); managed {
+		u.GitHTTPCredentialsConfigured = true
+	}
 	return u
 }
 
 func (r *UsersRepo) userQuery(where string, args ...any) (domain.User, bool) {
 	var row userWithConfig
 	q := r.DB.Raw(`SELECT `+userSelectColumns+` FROM users u LEFT JOIN user_configs c ON c.user_id=u.id WHERE `+where, args...)
-	if err := q.Scan(&row).Error; err != nil || row.ID == 0 {
+	if err := q.Scan(&row).Error; err != nil {
+		log.Printf("user query failed where=%s err=%v", where, err)
+		return domain.User{}, false
+	}
+	if row.ID == 0 {
 		return domain.User{}, false
 	}
 	return row.toDomain(), true
@@ -139,6 +158,87 @@ func (r *UsersRepo) UserByLoginName(loginName string) (domain.User, bool) {
 	return r.userQuery("LOWER(u.login_name) = LOWER(?)", loginName)
 }
 
+// ErrAccountHasActiveWork means an account still owns live work that must end
+// before its history can be removed.
+var ErrAccountHasActiveWork = errors.New("账号仍有运行中的任务或正在生成的对话")
+
+// DeletePlatformAccount removes the identity, authentication material, chat
+// transcripts, and settled runs. Other user-linked records are retained. It
+// refuses to delete live work so callers can stop execution first.
+func (r *UsersRepo) DeletePlatformAccount(id int64) error {
+	if id <= 0 {
+		return errors.New("valid user id is required")
+	}
+	return r.DB.Transaction(func(tx *gorm.DB) error {
+		var user struct {
+			ID int64 `gorm:"column:id"`
+		}
+		if err := tx.Table("users").Select("id").Where("id = ?", id).Take(&user).Error; err != nil {
+			return err
+		}
+		var runs []struct {
+			ID     string `gorm:"column:id"`
+			Status string `gorm:"column:status"`
+		}
+		if err := tx.Table("runs").Select("id, status").Where("JSON_EXTRACT(execution_context, '$.responsibleUserId') = ?", id).Find(&runs).Error; err != nil {
+			return err
+		}
+		for _, run := range runs {
+			if run.Status == "running" || run.Status == "waiting" || run.Status == "queued" {
+				return fmt.Errorf("%w（%s），请先停止后再删除", ErrAccountHasActiveWork, run.ID)
+			}
+			if err := deleteRunInTransaction(tx, run.ID); err != nil {
+				return err
+			}
+		}
+		var sessions []struct {
+			ID string `gorm:"column:id"`
+		}
+		if err := tx.Table("assistant_sessions").Select("id").Where("user_id = ?", id).Find(&sessions).Error; err != nil {
+			return err
+		}
+		for _, session := range sessions {
+			var live int64
+			if err := tx.Table("assistant_generations").Where("session_id = ? AND user_id = ? AND status = ?", session.ID, id, "running").Count(&live).Error; err != nil {
+				return err
+			}
+			if live > 0 {
+				return fmt.Errorf("%w，请等待结束后再删除", ErrAccountHasActiveWork)
+			}
+			if err := tx.Table("assistant_session_reads").Where("session_id = ?", session.ID).Delete(nil).Error; err != nil {
+				return err
+			}
+			if err := tx.Table("assistant_diagnostics").Where("session_id = ? AND user_id = ?", session.ID, id).Delete(nil).Error; err != nil {
+				return err
+			}
+			if err := tx.Table("assistant_generations").Where("session_id = ? AND user_id = ?", session.ID, id).Delete(nil).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Table("assistant_sessions").Where("user_id = ?", id).Delete(nil).Error; err != nil {
+			return err
+		}
+		// A deleted user's login and API tokens must no longer authenticate, and
+		// their personal secrets must not remain usable in the database.
+		if err := tx.Table("api_tokens").Where("user_id = ?", id).Delete(nil).Error; err != nil {
+			return err
+		}
+		if err := tx.Table("user_git_ssh_keys").Where("user_id = ?", id).Delete(nil).Error; err != nil {
+			return err
+		}
+		if err := tx.Table("user_git_http_credentials").Where("user_id = ?", id).Delete(nil).Error; err != nil {
+			return err
+		}
+		if err := tx.Table("local_accounts").Where("user_id = ?", id).Delete(nil).Error; err != nil {
+			return err
+		}
+		if err := tx.Table("user_configs").Where("user_id = ?", id).Delete(nil).Error; err != nil {
+			return err
+		}
+		return tx.Table("users").Where("id = ?", id).Delete(nil).Error
+	})
+}
+
 func (r *UsersRepo) UserByStaffID(staffID int) (domain.User, bool) {
 	return r.userQuery("u.staff_id=?", staffID)
 }
@@ -170,6 +270,7 @@ func (r *UsersRepo) PutUser(v domain.User) error {
 		v.ClaudeCodeAPIKey, v.ClaudeCodeBaseURL, v.ClaudeCodeModels = old.ClaudeCodeAPIKey, old.ClaudeCodeBaseURL, old.ClaudeCodeModels
 		v.CodeBuddyAPIKey = old.CodeBuddyAPIKey
 		v.CodeBuddyInternetEnvironment = old.CodeBuddyInternetEnvironment
+		v.CodeBuddyModels = old.CodeBuddyModels
 		v.AgentCLICredentials = old.AgentCLICredentials
 		if strings.TrimSpace(v.PlatformRole) == "" {
 			v.PlatformRole = old.PlatformRole
@@ -239,6 +340,7 @@ func userHasConfig(user domain.User) bool {
 		user.GongfengRefreshToken != "" ||
 		user.CodeBuddyAPIKey != "" ||
 		user.CodeBuddyInternetEnvironment != "" ||
+		len(user.CodeBuddyModels) > 0 ||
 		user.CodexAPIKey != "" ||
 		user.CodexBaseURL != "" ||
 		len(user.CodexModels) > 0 ||
@@ -256,6 +358,7 @@ type UserCredentialUpdate struct {
 	CodeBuddyAPIKey              string             `json:"codeBuddyApiKey"`
 	CodeBuddyAPIKeyClear         bool               `json:"codeBuddyApiKeyClear"`
 	CodeBuddyInternetEnvironment *string            `json:"codeBuddyInternetEnvironment"`
+	CodeBuddyModels              *[]domain.CLIModel `json:"codeBuddyModels"`
 	CodexAPIKey                  string             `json:"codexApiKey"`
 	CodexAPIKeyClear             bool               `json:"codexApiKeyClear"`
 	CodexBaseURL                 *string            `json:"codexBaseUrl"`
@@ -275,23 +378,38 @@ type AgentCLICredentialUpdate struct {
 	BaseURL     *string            `json:"baseUrl"`
 	Protocol    *string            `json:"protocol"`
 	Models      *[]domain.CLIModel `json:"models"`
+	// DiscoveredForKey prevents a refresh for an old key from replacing the
+	// new key's models.
+	DiscoveredForKey string `json:"-"`
 }
 
 func (r *UsersRepo) UpdateUserCredentials(id int64, update UserCredentialUpdate) (domain.User, error) {
+	var user domain.User
+	err := r.DB.Transaction(func(tx *gorm.DB) error {
+		// Serialize edits and CLI discovery for this user even when they
+		// arrive at different server instances or before a config row exists.
+		var owner userRow
+		if err := r.locking(tx.Select("id")).Where("id = ?", id).Take(&owner).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.New("user not found")
+			}
+			return err
+		}
+		credentials := &UsersRepo{deps: &deps{DB: tx}}
+		var err error
+		user, err = credentials.updateUserCredentials(id, update)
+		return err
+	})
+	if err != nil {
+		return domain.User{}, err
+	}
+	return user, nil
+}
+
+func (r *UsersRepo) updateUserCredentials(id int64, update UserCredentialUpdate) (domain.User, error) {
 	user, ok := r.User(id)
 	if !ok {
 		return domain.User{}, errors.New("user not found")
-	}
-	if update.GitTokenClear {
-		user.GitToken = ""
-		user.GongfengRefreshToken = ""
-		user.GongfengTokenExpiresAt = time.Time{}
-	} else if value := strings.TrimSpace(update.GitToken); value != "" {
-		user.GitToken = value
-		// A pasted personal access token replaces an OAuth grant. Leaving the
-		// refresh token in place would overwrite the paste on the next use.
-		user.GongfengRefreshToken = ""
-		user.GongfengTokenExpiresAt = time.Time{}
 	}
 	if update.CodeBuddyAPIKeyClear {
 		user.CodeBuddyAPIKey = ""
@@ -300,6 +418,13 @@ func (r *UsersRepo) UpdateUserCredentials(id int64, update UserCredentialUpdate)
 	}
 	if update.CodeBuddyInternetEnvironment != nil {
 		user.CodeBuddyInternetEnvironment = strings.TrimSpace(*update.CodeBuddyInternetEnvironment)
+	}
+	if update.CodeBuddyModels != nil {
+		models, err := normalizeCLIModels(*update.CodeBuddyModels)
+		if err != nil {
+			return domain.User{}, err
+		}
+		user.CodeBuddyModels = models
 	}
 	if update.CodexAPIKeyClear {
 		user.CodexAPIKey = ""
@@ -400,10 +525,18 @@ func applyAgentCLICredentialUpdates(user *domain.User, updates map[string]AgentC
 			return fmt.Errorf("不支持的 CLI：%s", kind)
 		}
 		cred := merged[kind]
+		previousKey := cred.APIKey
 		if update.APIKeyClear {
 			cred.APIKey = ""
 		} else if value := strings.TrimSpace(update.APIKey); value != "" {
 			cred.APIKey = value
+		}
+		// Cursor's catalog and effort variants belong to the key's plan.
+		// A replacement key starts with its own list unless the edit also
+		// supplies a catalog.
+		if kind == "cursor" && cred.APIKey != previousKey && update.Models == nil {
+			cred.Models = nil
+			cred.ModelsCustomized = false
 		}
 		if update.BaseURL != nil {
 			cred.BaseURL = strings.TrimSpace(*update.BaseURL)
@@ -415,12 +548,16 @@ func applyAgentCLICredentialUpdates(user *domain.User, updates map[string]AgentC
 			}
 			cred.Protocol = protocol
 		}
-		if update.Models != nil {
+		discovered := update.DiscoveredForKey != ""
+		if update.Models != nil && (!discovered || (!cred.ModelsCustomized && cred.APIKey == update.DiscoveredForKey)) {
 			models, err := normalizeCLIModels(*update.Models)
 			if err != nil {
 				return err
 			}
 			cred.Models = models
+			if kind == "cursor" {
+				cred.ModelsCustomized = !discovered && len(models) != 0
+			}
 		}
 		if cred.APIKey == "" && cred.BaseURL == "" && cred.Protocol == "" && len(cred.Models) == 0 {
 			delete(merged, kind)
@@ -482,16 +619,8 @@ func normalizeCLIModels(models []domain.CLIModel) ([]domain.CLIModel, error) {
 	seen := map[string]bool{}
 	for _, model := range models {
 		id, name := strings.TrimSpace(model.ID), strings.TrimSpace(model.Name)
-		if id == "" {
-			return nil, errors.New("模型 ID 不能为空")
-		}
-		if len(id) > maxCLIModelIDLen {
-			return nil, fmt.Errorf("模型 ID 长度不能超过 %d 个字符", maxCLIModelIDLen)
-		}
-		for _, r := range id {
-			if r <= ' ' || r == 0x7f || r == '"' || r == '\'' || r == '`' || r == '\\' {
-				return nil, fmt.Errorf("模型 ID %q 不能包含空格、引号、反斜杠或控制字符", id)
-			}
+		if err := validCLIModelID(id); err != nil {
+			return nil, err
 		}
 		if seen[id] {
 			return nil, fmt.Errorf("模型 ID %s 重复", id)
@@ -508,7 +637,87 @@ func normalizeCLIModels(models []domain.CLIModel) ([]domain.CLIModel, error) {
 		if name == id {
 			name = ""
 		}
-		out = append(out, domain.CLIModel{ID: id, Name: name})
+		efforts, defaultEffort, err := normalizeCLIModelEfforts(model.Efforts, model.DefaultEffort)
+		if err != nil {
+			return nil, fmt.Errorf("模型 %s：%w", id, err)
+		}
+		reasoningEfforts, err := normalizeCLIReasoningEfforts(model.ReasoningEfforts)
+		if err != nil {
+			return nil, fmt.Errorf("模型 %s：%w", id, err)
+		}
+		discoveredEfforts, err := normalizeCLIReasoningEfforts(model.DiscoveredReasoningEfforts)
+		if err != nil {
+			return nil, fmt.Errorf("模型 %s：%w", id, err)
+		}
+		out = append(out, domain.CLIModel{
+			ID: id, Name: name, Efforts: efforts, DefaultEffort: defaultEffort,
+			ReasoningEfforts: reasoningEfforts, DiscoveredReasoningEfforts: discoveredEfforts,
+		})
 	}
 	return out, nil
+}
+
+func normalizeCLIReasoningEfforts(raw *[]string) (*[]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	levels := make([]string, 0, len(*raw))
+	for _, level := range *raw {
+		level = strings.TrimSpace(level)
+		supported := false
+		for _, allowed := range domain.ExecutorEffortLevels {
+			if slices.Contains(allowed, level) {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			return nil, fmt.Errorf("不支持思考强度 %q", level)
+		}
+		if !slices.Contains(levels, level) {
+			levels = append(levels, level)
+		}
+	}
+	return &levels, nil
+}
+
+func validCLIModelID(id string) error {
+	if id == "" {
+		return errors.New("模型 ID 不能为空")
+	}
+	if len(id) > maxCLIModelIDLen {
+		return fmt.Errorf("模型 ID 长度不能超过 %d 个字符", maxCLIModelIDLen)
+	}
+	for _, r := range id {
+		if r <= ' ' || r == 0x7f || r == '"' || r == '\'' || r == '`' || r == '\\' {
+			return fmt.Errorf("模型 ID %q 不能包含空格、引号、反斜杠或控制字符", id)
+		}
+	}
+	return nil
+}
+
+// normalizeCLIModelEfforts checks the effort→model ID mapping of a Cursor
+// model family: efforts are Cursor's levels and every target is a valid
+// model ID. A default outside the mapping is dropped.
+func normalizeCLIModelEfforts(efforts map[string]string, defaultEffort string) (map[string]string, string, error) {
+	if len(efforts) == 0 {
+		return nil, "", nil
+	}
+	levels := domain.ExecutorEffortLevels["cursor"]
+	out := make(map[string]string, len(efforts))
+	for effort, raw := range efforts {
+		effort, raw = strings.TrimSpace(effort), strings.TrimSpace(raw)
+		if !slices.Contains(levels, effort) {
+			return nil, "", fmt.Errorf("不支持思考强度 %q", effort)
+		}
+		if err := validCLIModelID(raw); err != nil {
+			return nil, "", err
+		}
+		out[effort] = raw
+	}
+	defaultEffort = strings.TrimSpace(defaultEffort)
+	if _, ok := out[defaultEffort]; !ok {
+		defaultEffort = ""
+	}
+	return out, defaultEffort, nil
 }
